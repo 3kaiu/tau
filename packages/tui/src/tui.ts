@@ -33,6 +33,8 @@ export type TuiDeps = {
 export interface Tui {
   run(): Promise<void>
   stop(): void
+  /** 权限询问(action onPermission 回调入口):弹窗 -> 用户决策。 */
+  askPermission(req: { toolCallId: string; toolName: string; summary: string }): Promise<boolean>
 }
 
 const DEFAULT_SENDER: Sender = { clientId: "tui", kind: "tui" }
@@ -142,6 +144,7 @@ export function createTui(deps: TuiDeps): Tui {
       case "abort":
       case "approve":
       case "deny":
+      case "skill":
         editor.disableSubmit = true
         const result = await face.publish(parsed.command)
         editor.disableSubmit = false
@@ -204,5 +207,25 @@ export function createTui(deps: TuiDeps): Tui {
       return stopPromise
     },
     stop,
+    askPermission(req) {
+      return new Promise<boolean>((resolve) => {
+        const event = {
+          id: crypto.randomUUID(),
+          timestamp: new Date().toISOString(),
+          redact: [],
+          kind: "permission" as const,
+          requestId: req.toolCallId,
+          toolName: req.toolName,
+          summary: req.summary,
+          state: "requested" as const,
+        }
+        permissionPopup.show(event, (decision) => {
+          permissionPopup.dismiss()
+          ui.hideOverlay()
+          resolve(decision.approved)
+        })
+        ui.showOverlay(permissionPopup, { anchor: "center", width: "80%", maxHeight: 20 })
+      })
+    },
   }
 }

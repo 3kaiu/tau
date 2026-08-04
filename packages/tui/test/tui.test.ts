@@ -90,6 +90,24 @@ describe("prompt:parseInput", () => {
       expect(help).toContain(cmd.name)
     }
   })
+
+  it("/skill <name> -> skill 命令(展开为 prompt)", () => {
+    const r = parseInput("/skill greet", sender)
+    expect(r.kind).toBe("skill")
+    if (r.kind === "skill") {
+      expect(r.skillName).toBe("greet")
+      expect(r.command.kind).toBe("prompt")
+      if (r.command.kind === "prompt") {
+        expect(r.command.text).toContain("greet")
+        expect(r.command.text).toContain("skill:load")
+      }
+    }
+  })
+
+  it("/skill 缺名 -> unknown", () => {
+    const r = parseInput("/skill", sender)
+    expect(r.kind).toBe("unknown")
+  })
 })
 
 describe("print:renderEventLine", () => {

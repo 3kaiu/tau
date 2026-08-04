@@ -9,6 +9,7 @@ export type ParsedInput =
   | { kind: "abort"; command: Command }
   | { kind: "approve"; command: Command; requestId: string }
   | { kind: "deny"; command: Command; requestId: string }
+  | { kind: "skill"; skillName: string; command: Command }
   | { kind: "help" }
   | { kind: "unknown"; name: string; detail: string }
   | { kind: "empty" }
@@ -25,6 +26,7 @@ export const SLASH_COMMANDS: readonly SlashCommandDef[] = [
   { name: "abort", aliases: ["stop"], description: "打断当前 turn", usage: "/abort" },
   { name: "approve", description: "批准挂起的权限请求", usage: "/approve <requestId>" },
   { name: "deny", description: "拒绝挂起的权限请求", usage: "/deny <requestId>" },
+  { name: "skill", description: "激活技能(LLM 自动加载全文并执行)", usage: "/skill <name>" },
   { name: "help", description: "显示斜杠命令列表", usage: "/help" },
 ] as const
 
@@ -53,6 +55,10 @@ export function parseInput(raw: string, sender: Sender): ParsedInput {
     case "deny": {
       if (rest === "") return { kind: "unknown", name, detail: "缺 requestId" }
       return { kind: "deny", command: { kind: "abort", sender, targetId: rest }, requestId: rest }
+    }
+    case "skill": {
+      if (rest === "") return { kind: "unknown", name, detail: "缺技能名(用 /help 查看命令)" }
+      return { kind: "skill", skillName: rest, command: { kind: "prompt", sender, text: `请使用 skill:load 工具加载技能 "${rest}" 的全文,然后按照该技能的指引执行任务。` } }
     }
     case "help":
       return { kind: "help" }
