@@ -8,9 +8,9 @@
 - `face.publish(command)` → `CommandResult`(命令排队 + 回执)
 - `face.subscribe(filter)` → `EventStream`(SSE / JSONL / 回调)
 - `face.snapshot()` → `SessionSnapshot`(只读,拉模型)
-- **HTTP 模式**(Hono):`POST /command`、`GET /events(SSE, 支持 since=/Last-Event-ID 续传)`、`GET /session`;多会话路由:`GET /sessions`、`POST /sessions/:id/command`(M7 前置)
-- **ACP 模式**:editor 驱动会话(经 ACP 协议)
-- **RPC 模式**(JSON-RPC over stdio/HTTP):脚本与外部进程
+- **HTTP 模式**(Hono,M7 ✅):`POST /command`、`GET /events(SSE, 支持 Last-Event-ID 续传 + 心跳保活)`、`GET /snapshot`、`GET /health`;单会话模式,多会话路由延后至 M8
+- **ACP 模式**(M7 ✅):editor 驱动会话(经 JSON-RPC over stdio,`initialize`/`session/prompt`/`session/snapshot`/`session/abort`/`shutdown`)
+- **RPC 模式**(JSON-RPC over stdio/HTTP):脚本与外部进程(延后)
 - 无状态:状态在 session,命令面不持有会话状态
 
 ## 宪法

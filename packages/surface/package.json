@@ -14,6 +14,7 @@
   "dependencies": {
     "@tau/contract": "workspace:*",
     "@tau/orchestrate": "workspace:*",
-    "@tau/session": "workspace:*"
+    "@tau/session": "workspace:*",
+    "hono": "^4.7.0"
   }
 }

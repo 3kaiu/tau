@@ -1,17 +1,18 @@
-# @tau/app — 组装点与 CLI
+# @tau/app - 组装点与 CLI
 
 ## 使命
 唯一拼装点:Effect DI 把所有包接成可运行的 tau。CLI 入口、单二进制、配置解析。
 
 ## 功能(公开 API 面)
-- `tau [project]` — 交互模式(TUI)
-- `tau -p "prompt"` — print 模式(脚本友好,不 TUI)
-- `tau -j "prompt"` — JSONL 模式(机器消费)
-- `tau serve [--port]` — surface HTTP/SSE 服务(支持 `--sessions` 多会话路由,M7)
-- `tau acp` — ACP 服务(editor 驱动)
-- `tau doctor` — 环境自检(模型/凭据/proxy);无凭据时给"可操作的一步"(配置 key / 选择可用模型)
-- `tau eval` — 运行行为评测(委托 eval 包)
+- `tau [project]` - 交互模式(TUI)
+- `tau -p "prompt"` - print 模式(脚本友好,不 TUI);`--store <path>` 启用 SQLite 持久化
+- `tau -j "prompt"` - JSONL 模式(机器消费)
+- `tau serve [--port]` - surface HTTP/SSE 服务(支持 `--sessions` 多会话路由,M7)
+- `tau acp` - ACP 服务(editor 驱动)
+- `tau doctor` - 环境自检(模型/凭据/proxy);无凭据时给"可操作的一步"(配置 key / 选择可用模型)
+- `tau eval` - 运行行为评测(委托 eval 包)
 - 配置:`.tau/config.*`(项目级)+ `~/.tau/config.*`(全局),JSON/YAML
+- 持久化:`--store <path>` 指定 SQLite 文件;缺省内存(重启丢失)。compose 支持 `storePath` 选项
 
 ## 宪法
 1. **app 是唯一拼装点**:除 app 外任何包不得 import 其他包的运行时依赖
