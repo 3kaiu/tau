@@ -65,4 +65,6 @@ export interface Store {
   kv: KvTable
   tx<T>(work: () => T): T
   migrate(): void
+  /** 关闭底层连接(memory 无操作;sqlite 释放文件句柄)。 */
+  close?: () => void
 }

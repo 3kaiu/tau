@@ -1,18 +1,27 @@
-// @tau/store — 汇总出口。sqlite 驱动与迁移随 M4(持久化)落地;M2 只发布 memory。
+// @tau/store - 汇总出口。memory 与 sqlite 双驱动,接口一致,可热切换。
 
 import type { Store } from "./store.ts"
 import { MemoryStore } from "./memory.ts"
+import { SqliteStore } from "./sqlite.ts"
 
 export const version = "0.0.1"
 
 export type { Store, StoreMessage, StoreEvent, MessagePage, AuditEntry, AuditQuery, SessionTable, MessageTable, EventTable, AuditTable, KvTable } from "./store.ts"
 export { MemoryStore } from "./memory.ts"
+export { SqliteStore } from "./sqlite.ts"
+export { migrate, SCHEMA_VERSION } from "./migrate.ts"
 
 export function createMemoryStore() {
   return new MemoryStore()
 }
 
-export function createStore(driver: "sqlite" | "memory"): Store {
+export function createSqliteStore(path: string) {
+  return new SqliteStore(path)
+}
+
+/** path 仅 sqlite 用;缺省 ":memory:"(SQLite 内存库,与 MemoryStore 行为对齐但走真实 SQL)。 */
+export function createStore(driver: "sqlite" | "memory", path?: string): Store {
   if (driver === "memory") return new MemoryStore()
-  throw new Error("sqlite 驱动随 M4(持久化)落地;当前仅 memory")
+  if (driver === "sqlite") return new SqliteStore(path ?? ":memory:")
+  throw new Error(`未知驱动:${driver}`)
 }
