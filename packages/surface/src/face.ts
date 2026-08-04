@@ -1,7 +1,7 @@
 // @tau/surface - face.ts:CommandFace 聚合(发布/订阅/快照)。
 // 命令面无状态:一切状态在 session;只发布与观察,不生成内容。
 
-import type { Command, Event, SessionSnapshot } from "@tau/contract"
+import type { Command, Event, InputAcceptedEvent, SessionSnapshot } from "@tau/contract"
 import type { Scheduler } from "@tau/orchestrate"
 import type { Session } from "@tau/session"
 
@@ -33,10 +33,17 @@ export function createCommandFace(deps: FaceDeps): CommandFace {
     for (const fn of listeners) fn(event)
   }
 
-  void emit
-
   return {
     async publish(command) {
+      // input_accepted 回执:命令面无状态,sender 由上游发布方(如 tui 的 DEFAULT_SENDER)填好,
+      // 此处原样透传供审计溯源——face 不重写 sender,因为 Command 契约已强制 sender 必填。
+      emit({
+        id: uuid(),
+        timestamp: new Date().toISOString(),
+        redact: [],
+        kind: "input_accepted",
+        command,
+      } satisfies InputAcceptedEvent)
       switch (command.kind) {
         case "prompt": {
           const result = await deps.orchestrate.prompt({ text: command.text, source: "prompt" })
@@ -47,13 +54,12 @@ export function createCommandFace(deps: FaceDeps): CommandFace {
           return { accepted: true, eventId: uuid(), detail: "steer 已排队" }
         }
         case "abort": {
-          if (command.targetId !== undefined) {
-            // deny 权限请求:targetId = questionId
-            deps.session.resolvePending(command.targetId, false)
-            return { accepted: true, eventId: uuid(), detail: "权限已拒绝" }
-          }
           deps.orchestrate.abort()
           return { accepted: true, eventId: uuid(), detail: "已中断" }
+        }
+        case "deny": {
+          deps.session.resolvePending(command.requestId, false)
+          return { accepted: true, eventId: uuid(), detail: "权限已拒绝" }
         }
         case "approve": {
           // approve 的 toolCallId 字段实际承载 questionId(来自 permission 事件 requestId)

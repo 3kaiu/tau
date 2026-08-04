@@ -1,4 +1,4 @@
-// @tau/eval - asserts.ts:13 个行为断言(契约级,离线,FauxLlm 驱动)。
+// @tau/eval - asserts.ts:行为断言(契约级,离线,FauxLlm 驱动)。
 // 断言检查只依赖 contract 不变量(assertX);fixture 负责构造场景。
 // 每个断言独立创建 fixture,无共享状态;失败抛 Error,runner 捕获汇总。
 
@@ -470,8 +470,36 @@ const assert17: Assert = {
   },
 }
 
+// ---------- 18. deny 命令闭环 ----------
+
+const assert18: Assert = {
+  id: 18,
+  name: "deny 命令闭环",
+  description: "deny 命令经 face → session.resolvePending(false) → permission(denied) 事件,挂起权限消除",
+  async run() {
+    const f = createFixture({ script: { replies: [textReply("ok")] } })
+    // 挂起一个待授权 syscall(模拟 ask 工具等待用户决策)
+    const pending = f.session.pendSyscall({ toolCallId: "c1", toolName: "bash", summary: "echo hi" })
+    if (f.session.snapshot().pendingSyscalls.length === 0) throw new Error("pendSyscall 未进入挂起列表")
+    // 用户经 face 发布 deny 命令(对应 ApprovalState.denied)
+    const result = await f.face.publish({
+      kind: "deny",
+      sender: { clientId: "eval", kind: "cli" },
+      requestId: pending.questionId,
+      reason: "",
+    })
+    if (!result.accepted) throw new Error("deny 命令未被接受")
+    const denied = f.events.find(
+      (e) => e.kind === "permission" && e.state === "denied" && e.requestId === pending.questionId,
+    )
+    if (denied === undefined) throw new Error("deny 后缺 permission(denied) 事件")
+    if (f.session.snapshot().pendingSyscalls.length !== 0) throw new Error("deny 后挂起权限未消除")
+    f.cleanup()
+  },
+}
+
 export const allAsserts: readonly Assert[] = [
   assert1, assert2, assert3, assert4, assert5, assert6,
   assert7, assert8, assert9, assert10, assert11, assert12, assert13,
-  assert14, assert15, assert16, assert17,
+  assert14, assert15, assert16, assert17, assert18,
 ]

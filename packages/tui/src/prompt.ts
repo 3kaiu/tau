@@ -54,7 +54,7 @@ export function parseInput(raw: string, sender: Sender): ParsedInput {
     }
     case "deny": {
       if (rest === "") return { kind: "unknown", name, detail: "缺 requestId" }
-      return { kind: "deny", command: { kind: "abort", sender, targetId: rest }, requestId: rest }
+      return { kind: "deny", command: { kind: "deny", sender, requestId: rest, reason: "" }, requestId: rest }
     }
     case "skill": {
       if (rest === "") return { kind: "unknown", name, detail: "缺技能名(用 /help 查看命令)" }

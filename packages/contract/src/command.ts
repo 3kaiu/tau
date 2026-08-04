@@ -38,6 +38,15 @@ export const ApproveCommandSchema = z.object({
 })
 export type ApproveCommand = z.infer<typeof ApproveCommandSchema>
 
+/** deny 与 ApprovalState.denied 一一对应:用户/客户端显式拒绝某权限请求。 */
+export const DenyCommandSchema = z.object({
+  kind: z.literal("deny"),
+  sender: SenderSchema,
+  requestId: z.string(),
+  reason: z.string().default(""),
+})
+export type DenyCommand = z.infer<typeof DenyCommandSchema>
+
 /** answer 必带 questionId,与 pendingSyscalls.questionId 配对。 */
 export const AnswerCommandSchema = z.object({
   kind: z.literal("answer"),
@@ -78,6 +87,7 @@ export const CommandSchema = z.discriminatedUnion("kind", [
   PromptCommandSchema,
   SteerCommandSchema,
   ApproveCommandSchema,
+  DenyCommandSchema,
   AnswerCommandSchema,
   AbortCommandSchema,
   SelectCommandSchema,
