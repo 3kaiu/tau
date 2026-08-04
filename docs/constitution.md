@@ -17,7 +17,7 @@ LLM 是思考者和执行者;**agent 的一切是增强 LLM 能力的层**;TUI �
 
 ## 第四条 依赖法
 
-依赖单向向下:`contract ← llm/store ← session/action ← orchestrate ← surface ← tui`;`enhance → session/action`。禁止循环 import;`app` 是唯一拼装点,包间不得互相 new 依赖。
+依赖单向向下(精确边):`llm→contract`;`store→contract`;`session/action→contract+store`;`orchestrate→contract+llm+session+action+store`;`surface→contract+orchestrate+session`;`tui→contract+surface`;`enhance→contract+store+session+action`(LLM 摘要 policy 经构造期注入回调接入,不依赖 llm)。禁止循环 import;`app` 是唯一拼装点,包间不得互相 new 依赖。
 
 ## 第五条 副作用法
 

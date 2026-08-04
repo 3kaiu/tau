@@ -11,7 +11,7 @@
 
 ## 结构
 
-- `packages/` 依赖单向向下:contract ← llm/store ← session/action ← orchestrate ← surface ← tui;enhance → llm/session/action(LLM 摘要 policy 经 llm);app 是唯一拼装点
+- `packages/` 依赖单向向下(精确边):llm→contract;store→contract;session/action→contract+store;orchestrate→contract+llm+session+action+store;surface→contract+orchestrate+session;tui→contract+surface;enhance→contract+store+session+action(LLM 摘要 policy 经 app 构造期注入回调,不 import llm);app 是唯一拼装点;app 是唯一拼装点
 - 契约 schema(schema/类型/枚举)只在 `contract` 包;其他包 import `@tau/contract`,禁止自造重复类型
 - 每个包的职责边界与宪法在 `packages/*/SPEC.md`;改包前先读自己包和相邻包的 SPEC
 

@@ -8,7 +8,7 @@
 - `face.publish(command)` → `CommandResult`(命令排队 + 回执)
 - `face.subscribe(filter)` → `EventStream`(SSE / JSONL / 回调)
 - `face.snapshot()` → `SessionSnapshot`(只读,拉模型)
-- **HTTP 模式**(Hono,M7 ✅):`POST /command`、`GET /events(SSE, 支持 Last-Event-ID 续传 + 心跳保活)`、`GET /snapshot`、`GET /health`;单会话模式,多会话路由延后至 M8
+- **HTTP 模式**(Hono,M7 ✅):`POST /command`、`GET /events(SSE, 支持 Last-Event-ID 续传 + 心跳保活)`、`GET /snapshot`、`GET /health`;单会话模式,多会话路由归入 M9 会话治理(与 `tau sessions` list/resume 一并落地)
 - **ACP 模式**(M7 ✅):editor 驱动会话(经 JSON-RPC over stdio,`initialize`/`session/prompt`/`session/snapshot`/`session/abort`/`shutdown`)
 - **RPC 模式**(JSON-RPC over stdio/HTTP):脚本与外部进程(延后)
 - 无状态:状态在 session,命令面不持有会话状态
@@ -18,7 +18,7 @@
 2. **只发布与观察**:命令面无权直接调用 llm/action/session 内部——一切经 Command/Event 契约
 3. **连接可重连**:Event 流带 epoch/续传标记(Last-Event-ID / `since=`),断线重连不丢事件;订阅响应携带 `snapshotEpoch`——客户端"先快照后订阅"不丢窗口
 4. **不生成内容**:不拼接 prompt、不执行工具;只是协议翻译
-5. **权限继承**:命令面的每个客户端拥有独立身份与 capability 前缀;Command 的 `sender{clientId,kind}` 由面填充,approve/answer/abort 强制;permission_request **广播到所有客户端**,首个 approve/answer 生效(sender 审计),后续忽略;permission_request 携带**参数摘要**(命令全文/路径),面层原样透传不裁剪——安全链最后一环(tui 渲染)依赖此字段
+5. **权限继承**:命令面的每个客户端拥有独立身份与 capability 前缀;Command 的 `sender{clientId,kind}` 由面填充,approve/answer/abort 强制;权限请求经 `permission(requested)` 事件 **广播到所有客户端**(requestId + 参数摘要,面层原样透传不裁剪——安全链最后一环(tui 渲染)依赖此字段),首个 approve(其 toolCallId 字段承载 requestId)/deny 生效(sender 审计),后续忽略
 6. **observe 可见范围**:只读观察者默认不可见审计/权限明细与工具结果原文(敏感);订阅 filter 默认值 = 公开事件,需降级授权才看明细
 
 ## 内部模块

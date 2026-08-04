@@ -9,6 +9,7 @@ LLM 的手脚。唯一副作用出口:安全、可审计、可中断地执行 Sy
 - `plane.execute(call)` → `Stream<ToolEvent>`(流式结果 + 取消)
 - `plane.capabilities()` — capability 门(默认拒绝/允许/询问三态规则表)
 - `plane.permissionRequest()` / `plane.grant(caps, scope)` — 授权流(一次批准 N 次)
+- **权限事件双轨**:询问时同时发 `permission(requested)` 事件(requestId + 参数摘要)与调用 `onPermission` 回调(本地弹窗);决议后发 `granted/denied/timeout` 事件——**requested 事件供远程客户端/观察者经 Event 流可见(approve/deny 凭 requestId 定位),回调供本地 UI 即时决策,双轨不互斥**
 - `plane.audit.query(filter)` — 副作用审计日志查询(LLM 可查自己的 syscall 史)
 - 内置工具:read/write/edit/bash/grep/find/ls/ask_user/retrieve/fetch/system/tool:catalog(工具目录查询,冷工具按需注入)
 - read 支持 `range{from,to}` / `preview`(前 N 行 + 总行数报告)——大文件不整读;结果带 `fileMeta { mtime, size, hash? }`(模型判断文件是否已被改动)
@@ -54,8 +55,8 @@ LLM 的手脚。唯一副作用出口:安全、可审计、可中断地执行 Sy
 | `src/pty.ts` | 交互终端(后期) |
 
 ## 模块宪法要点
-- `runtime.ts`:同一工具可并发,文件写操作串行(互斥队列);write/edit 走临时文件 + rename 原子提交;取消/超时终止整棵进程树,后台任务取消时清理孤儿
-- `capability.ts`:询问时发的 `permission_request` 事件必须带工具名/能力/理由 + **参数摘要**(bash 命令全文、write 目标路径)——用户批准前看到"模型要跑什么",不只是"要不要放行"
+- `runtime.ts`:同一工具可并发,文件写操作串行(互斥队列);**执行并发按 tier 分级(T0 互斥串行 / T1 并行,与契约 tier 语义一致)**;write/edit 走临时文件 + rename 原子提交;取消/超时终止整棵进程树,后台任务取消时清理孤儿
+- `capability.ts`:询问时发 `permission(requested)` 事件(requestId/工具名/能力/理由 + **参数摘要**:bash 命令全文、write 目标路径)并同步调 `onPermission` 回调——用户批准前看到"模型要跑什么",不只是"要不要放行";决议后发 `granted/denied/timeout` 事件,approve(经 toolCallId 承载 requestId)/deny 定位到挂起请求
 - `audit.ts`:审计记录本身也是事件,进入 LLM 可查空间;审计记录带 **`turnId`**(提交点边界由 orchestrate promote 写入)——recovery 悬置判定("上次 turn 已提交/未提交的 syscall")以 turnId 为判定输入
 - `workspace.ts`:根列表/忽略规则(gitignore)预编译匹配树;文件树增量索引(按 mtime 失效,不全量重扫);workspace 语义对 contract 的 workspaceRoots 负责,对 session/enhance 提供查询接口;**multi-run fork 子会话时持久 shell 初始 cwd = 子会话 worktree 根**
 - `tools/bash.ts`:长输出截断 + 环境注入(session 元数据),受 `PI_` 式环境变量约束;**缺省会话级持久 shell**(shellId 缺省 = 当前会话;`new_shell: true` 重置);结果必带 exitCode,stdout/stderr 分离;危险命令模式检测命中 → 强制询问

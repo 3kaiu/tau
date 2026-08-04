@@ -10,7 +10,7 @@
 - `enhancer.catalog()` → 技能目录(名称+一句话,常驻 system,供模型发现);`skill:load` syscall 按需取全文
 - `enhancer.search(query)` — skill 检索(名称/描述/触发词索引)
 - `enhancer.remember(sessionId, key, content, { overwrite })` / `enhancer.recall(sessionId, key)` / `enhancer.forget(sessionId, key)` — T2 记忆 syscall 后端(可覆写/清理,模型写错可纠)
-- `enhancer.summarize(sessionId, window)` — **摘要策略**(压缩的摘要源):默认规则摘要(按 retention 分级裁剪 + 要点提取),可插拔 LLM 摘要 policy(经 session.project + llm,走唯二出口);session.compact 的摘要文本由此产出
+- `enhancer.summarize(sessionId, window)` — **摘要策略**(压缩的摘要源):默认规则摘要(按 retention 分级裁剪 + 要点提取);可插拔 LLM 摘要 policy,经**构造期注入回调** `opts.llmSummarize` 接入(app 在拼装点注入带 llm 访问的实现;enhance 不 import llm,同 session 摘要回调模式,不违反依赖方向);不注入则回退纯规则摘要;session.compact 的摘要文本由此产出
 - `enhancer.plugins.register/uninstall` — 插件生命周期(opencode plugin API 兼容)
 - 默认 policy 集:codemode 解释器(子代理 coder/explore/plan)
 
@@ -39,7 +39,7 @@
 - `loader.ts`:装载结果可复现(mtime/hash 决定),缓存失效策略显式声明
 - `skills.ts`:触发匹配不进 Context,匹配是内部算法(节省 token)
 - `plugins.ts`:插件 API 面保持 opencode 兼容,内部实现自由;**装载形态显式决策(单二进制兼容)**:发布版(Bun `--compile`)插件经外部子进程协议接入(与 MCP 同构),内联 JS 插件仅开发模式可用或随编译内置注册——动态装载与单二进制冲突必须事先声明,不默认都支持
-- `summarize.ts`:默认规则摘要不调 LLM(常量级),LLM 摘要 policy 走 session.project + llm 唯二出口;摘要只服务压缩交换,不产生新事实(不臆造历史)
+- `summarize.ts`:默认规则摘要不调 LLM(常量级);LLM 摘要 policy 只经构造期注入回调(`opts.llmSummarize`,app 拼装点注入,回调内部走 session.project + llm 唯二出口),**enhance 本体不 import llm**;摘要只服务压缩交换,不产生新事实(不臆造历史)
 - `frontmatter.ts`:解析失败不崩溃,降级为纯文本(宽容)
 
 ## 开源依赖
