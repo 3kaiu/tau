@@ -3,9 +3,31 @@
 // 长输出虚拟化:只保留最近 maxLines 行,旧行丢弃(不 DOM 全量重建)。
 
 import type { Component } from "@earendil-works/pi-tui"
-import type { Event, Message } from "@tau/contract"
+import type { ContentBlock, Event, Message } from "@tau/contract"
 import { roleColor, statusColor } from "../theme.ts"
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui"
+
+/**
+ * 单内容块 → 可见文本。thinking/artifact 是审计7 P1-2/P1-3 新增的契约变体,
+ * 必须显式渲染(而非退回 [image]),否则这两类信息在 TUI 不可见(违反双视角不变量)。
+ */
+function formatBlock(b: ContentBlock): string {
+  switch (b.type) {
+    case "text":
+      return b.text
+    case "image":
+      return statusColor.dim("[image]")
+    case "thinking":
+      return statusColor.dim(`(thinking) ${b.text}`)
+    case "artifact": {
+      const meta = [b.mime, b.size !== undefined ? `${b.size}B` : null]
+        .filter((x): x is string => x !== null)
+        .join(" ")
+      const ref = b.ref ? statusColor.dim(` ref=${b.ref}`) : ""
+      return `${statusColor.accent(`[artifact${meta ? ` ${meta}` : ""}]`)}${ref}`
+    }
+  }
+}
 
 export type TranscriptOptions = {
   maxLines?: number
@@ -21,9 +43,7 @@ function formatMessage(msg: Message, width: number): string[] {
     return formatToolMessage(msg, prefix, contentW)
   }
 
-  const text = msg.content
-    .map((b) => (b.type === "text" ? b.text : "[image]"))
-    .join("")
+  const text = msg.content.map(formatBlock).join("")
 
   if (text === "" && msg.toolCalls.length === 0) return []
 

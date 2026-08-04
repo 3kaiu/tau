@@ -1,7 +1,25 @@
 // @tau/surface — print.ts:print 模式渲染(转述流,非 TUI;M2 过渡)。
 // 订阅 Event 流,把会话转述渲染到 stdout;工具调用/事件带前缀标记,机器与人都可读。
 
-import type { Event } from "@tau/contract"
+import type { ContentBlock, Event } from "@tau/contract"
+
+/** 单内容块 → 纯文本(转述流)。thinking/artifact 显式渲染,避免退回 [image]。 */
+function formatBlock(b: ContentBlock): string {
+  switch (b.type) {
+    case "text":
+      return b.text
+    case "image":
+      return "[image]"
+    case "thinking":
+      return `(思考链) ${b.text}`
+    case "artifact": {
+      const meta = [b.mime, b.size !== undefined ? `${b.size}字节` : null]
+        .filter((x): x is string => x !== null)
+        .join(" ")
+      return `[附件${meta ? ` ${meta}` : ""}${b.ref ? ` ref=${b.ref}` : ""}]`
+    }
+  }
+}
 
 export type PrintStyle = {
   /** 前缀样式:plain(仅文本)/ marked(带事件标记) */
@@ -18,10 +36,10 @@ export function createPrintRenderer(style: PrintStyle = {}) {
       case "transcript": {
         const { message } = event
         if (message.role === "user") {
-          const text = message.content.map((b) => (b.type === "text" ? b.text : "[image]")).join("")
+          const text = message.content.map(formatBlock).join("")
           lines.push(`> ${text}`)
         } else if (message.role === "assistant") {
-          const text = message.content.map((b) => (b.type === "text" ? b.text : "[image]")).join("")
+          const text = message.content.map(formatBlock).join("")
           if (text !== "") lines.push(text)
           if (showTools && message.toolCalls.length > 0) {
             for (const call of message.toolCalls) {

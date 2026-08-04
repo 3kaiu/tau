@@ -3,7 +3,25 @@
 // -p:人类可读转述流; -j:JSONL(wire 格式,机器消费,严格对齐 contract 事件)。
 
 import type { CommandFace } from "@tau/surface"
-import type { Event, Sender } from "@tau/contract"
+import type { ContentBlock, Event, Sender } from "@tau/contract"
+
+/** 单内容块 → 纯文本(print 模式供脚本消费,不着色)。thinking/artifact 显式渲染。 */
+function formatBlock(b: ContentBlock): string {
+  switch (b.type) {
+    case "text":
+      return b.text
+    case "image":
+      return "[image]"
+    case "thinking":
+      return `(thinking) ${b.text}`
+    case "artifact": {
+      const meta = [b.mime, b.size !== undefined ? `${b.size}B` : null]
+        .filter((x): x is string => x !== null)
+        .join(" ")
+      return `[artifact${meta ? ` ${meta}` : ""}${b.ref ? ` ref=${b.ref}` : ""}]`
+    }
+  }
+}
 
 export type PrintStyle = "print" | "jsonl"
 
@@ -20,11 +38,11 @@ export function renderEventLine(event: Event, showTools: boolean): string[] {
     case "transcript": {
       const { message } = event
       if (message.role === "user") {
-        const text = message.content.map((b) => (b.type === "text" ? b.text : "[image]")).join("")
+        const text = message.content.map(formatBlock).join("")
         return [`> ${text}`]
       }
       if (message.role === "assistant") {
-        const text = message.content.map((b) => (b.type === "text" ? b.text : "[image]")).join("")
+        const text = message.content.map(formatBlock).join("")
         const lines: string[] = []
         if (text !== "") lines.push(text)
         if (showTools) {
@@ -49,7 +67,7 @@ export function renderEventLine(event: Event, showTools: boolean): string[] {
         return lines
       }
       if (message.role === "system") {
-        const text = message.content.map((b) => (b.type === "text" ? b.text : "")).join("")
+        const text = message.content.map(formatBlock).join("")
         return text !== "" ? [`# ${text}`] : []
       }
       return []
