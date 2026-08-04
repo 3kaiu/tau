@@ -14,10 +14,20 @@ export const DEFAULT_RULES: readonly CapabilityRule[] = [
 ]
 
 export class CapabilityGate {
-  readonly rules: readonly CapabilityRule[]
+  private _rules: readonly CapabilityRule[]
 
   constructor(rules: readonly CapabilityRule[] = DEFAULT_RULES) {
-    this.rules = rules
+    this._rules = rules
+  }
+
+  get rules(): readonly CapabilityRule[] {
+    return this._rules
+  }
+
+  /** 追加规则(运行时装载,如 MCP server 的 defaultRule;后置优先)。 */
+  addRule(rule: CapabilityRule): void {
+    if (rule.scope !== "tool") return
+    this._rules = [...this._rules, rule]
   }
 
   /** 匹配规则:同 pattern 精确或通配;规则表后置优先(冲突以后置为准)。 */

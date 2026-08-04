@@ -14,6 +14,14 @@ export type SchedulerDeps = {
   action: ActionPlane
 }
 
+/** 上下文压缩策略(scheduler 触发,摘要源注入:enhance.summarize 或 LLM policy)。 */
+export type CompactStrategy = {
+  /** 触发阈值:投影历史估算 token 占模型上下文窗比例,超则压缩(缺省 0.7)。 */
+  thresholdRatio?: number
+  /** 摘要生成(经 session.compact 落为 summary 消息;message 为完整历史)。 */
+  summarize: (input: { sessionId: string; messages: readonly Message[]; reason: string }) => string | Promise<string>
+}
+
 export type SchedulerOptions = {
   maxTurns?: number
   maxTurnMs?: number
@@ -25,6 +33,8 @@ export type SchedulerOptions = {
   onEvent?: (event: Event) => void
   /** Goal 判定配置:每 turn 后校验目标,未完成继续。 */
   goalJudge?: GoalJudge
+  /** 上下文压缩:超预算时自动压缩历史(缺省不压缩)。 */
+  compact?: CompactStrategy
 }
 
 export type SchedulerInput = {
@@ -188,6 +198,10 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
       }
       if (looped) break
       if (calls.length === 0) break
+      // 上下文压缩:turn 尾部检查历史体积,超预算 → 摘要化老消息(下一轮看到压缩后历史)
+      if (options.compact !== undefined) {
+        await maybeCompact(session, options.compact)
+      }
       if (myEpoch !== steerEpoch) break
     }
 
@@ -265,6 +279,20 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
     } finally {
       if (timer !== undefined) clearTimeout(timer)
     }
+  }
+
+  /** 投影历史体积估算(字符/4 ≈ token);超模型上下文窗阈值 → 摘要化老消息。 */
+  async function maybeCompact(sessionIn: Session, strategy: CompactStrategy): Promise<void> {
+    const projection = sessionIn.project()
+    const history = projection.history
+    const maxTokens = projection.self.model.contextWindow.maxTokens
+    const estimatedTokens = history.reduce(
+      (n, m) => n + m.content.reduce((acc, b) => acc + (b.type === "text" ? b.text.length : 0), 0) / 4,
+      0,
+    )
+    if (estimatedTokens <= maxTokens * (strategy.thresholdRatio ?? 0.7)) return
+    const summaryText = await strategy.summarize({ sessionId: sessionIn.sessionId, messages: history, reason: "context-overflow" })
+    sessionIn.compact("context-overflow", summaryText)
   }
 
   return {

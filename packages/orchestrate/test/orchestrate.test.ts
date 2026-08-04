@@ -54,6 +54,67 @@ function withTool(projection: ContextProjection, tool: SystemCall): ContextProje
 }
 
 describe("orchestrate:turn 状态机", () => {
+  it("压缩闭环:历史超预算 → summarize 注入 → compact 落 summary 消息 + compression 事件", async () => {
+    const behavior: LlmBehavior = (calls) =>
+      calls === 0
+        ? { text: "", thinking: "", toolCalls: [{ id: "t1", name: "read", args: { path: "a.txt" } }], usage: undefined, finishReason: "tool-calls", error: undefined, aborted: false }
+        : { text: "收尾", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop", error: undefined, aborted: false }
+    const { store, action } = fresh(behavior)
+    const sessionEvents: Event[] = []
+    const session = createSession({ store, sessionId: "s1", cwd: "/tmp/tau-test", workspaceRoots: ["/tmp/tau-test"], onEvent: (e) => sessionEvents.push(e) })
+    await action.execute({ sessionId: "s1", toolCallId: "w0", name: "write", args: { path: "a.txt", content: "hi" }, cwd: "/tmp/tau-test" })
+    const orig = session.project.bind(session)
+    session.project = () => withTool(orig(), readCall)
+
+    // 压一条超长 assistant 消息(role 非 user,retention normal)入历史(体积远超阈值),并补足历史条数(> keepRecent 6)
+    session.appendMessage({
+      id: "long-a1",
+      role: "assistant",
+      content: [{ type: "text", text: `y`.repeat(80_000) }],
+      toolCalls: [],
+      toolResults: [],
+      interrupted: false,
+      source: "model",
+      retention: "normal",
+      createdAt: new Date().toISOString(),
+    })
+    session.admit({ text: "背景 1", source: "prompt", wake: "prompt" })
+    session.admit({ text: "背景 2", source: "prompt", wake: "prompt" })
+    session.admit({ text: "背景 3", source: "prompt", wake: "prompt" })
+    session.admit({ text: "背景 4", source: "prompt", wake: "prompt" })
+    session.admit({ text: "背景 5", source: "prompt", wake: "prompt" })
+
+    const summaries: string[] = []
+    const schedulerWithCompact = createScheduler(
+      { llm: fakeLlm(behavior), session, action },
+      {
+        model: "fake",
+        maxTurns: 3,
+        maxTurnMs: 2000,
+        maxRetries: 1,
+        compact: { thresholdRatio: 0.1, summarize: async (i) => { summaries.push(i.reason); return `摘要:${i.messages.length} 条` } },
+      },
+    )
+
+    const result = await schedulerWithCompact.prompt({ text: "读 a.txt" })
+    expect(result.error).toBeNull()
+    expect(summaries).toContain("context-overflow")
+
+    const compression = sessionEvents.filter((e) => e.kind === "compression")
+    expect(compression.length).toBeGreaterThan(0)
+    if (compression[0]!.kind === "compression") {
+      expect(compression[0].strategy).toBe("context-overflow")
+      expect(compression[0].droppedIds.length).toBeGreaterThan(0)
+    }
+
+    // summary 消息落历史(source: compaction),长 assistant 消息被丢弃
+    const hist = session.project().history
+    const summaryMsg = hist.find((m) => m.source === "compaction")
+    expect(summaryMsg).toBeDefined()
+    expect(hist.some((m) => m.role === "assistant" && (m.content[0]?.type === "text") && (m.content[0] as { text: string }).text.startsWith("y".repeat(80_000)))).toBe(false)
+    void store
+  })
+
   it("单轮文本回复:admit + assistant 消息落历史", async () => {
     const { session, scheduler } = fresh(() => ({ text: "好的", thinking: "", toolCalls: [], usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 }, finishReason: "stop", error: undefined, aborted: false }))
     const result = await scheduler.prompt({ text: "你好" })

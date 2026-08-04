@@ -83,6 +83,7 @@ export function project(input: ProjectorInput, opts: ProjectorOptions): ContextP
       ...(opts.git !== undefined ? { git: opts.git } : {}),
       permissions: [...opts.permissions],
       skills: { ...(opts.skills.dir !== undefined ? { dir: opts.skills.dir } : {}), names: [...opts.skills.names] },
+      session: { id: opts.sessionId },
     },
     resources: {
       maxConcurrentTurns: opts.maxConcurrentTurns,

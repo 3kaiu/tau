@@ -47,6 +47,7 @@
 - `lifecycle.ts`:同"失败指纹"扩展为**行为指纹**(同工具同参数无论成败 N 次)→ `loop_detected` + 投影告警;steer 中断粒度:缺省"当前工具执行完 + 本 turn 结束",可配"立即断流"(已完成的工具结果提交,未完成部分带 interrupted);重试带 `retry` 事件;crash 恢复发 `recovery` 事件 + **副作用悬置判定**(从审计日志判定上次 turn 已提交/未提交的 syscall 清单,告警带清单,模型据此检查文件而非瞎猜)
 - `cron.ts`/`queues.ts`:唤醒时产出 `wake.reason`(cron/steer/goal_continue/answer);steer 进历史带 `user_steer` 标记(模型区分"新指令"与"打断插话")
 - `cron.ts`:判定全为纯函数(离线可断言);**`lastRunAt` 是幂等锚点**——`isDue` 从"上次运行(或创建)之后的下一个命中"起算,同一命中不会因重复调用 `run` 而重复触发;`dom` 与 `dow` 同时受限时取"或"(标准 cron 语义);非法表达式返回 `null` 交调用方给可操作报错,不静默当成"永不触发"
+- `scheduler.ts` 压缩闭环:turn 尾部(tool 循环后、下一轮 complete 前)检查投影历史体积(字符/4 ≈ token),超模型 contextWindow × thresholdRatio(缺省 0.7)时经注入的 `compact.summarize` 生成摘要,`session.compact("context-overflow", ...)` 落 summary 消息;摘要策略经构造期注入(enhance.summarize / LLM policy),scheduler 不 import enhance;**用户输入(admit,retention high)永不丢**,low/normal 先丢,最近 keepRecent 条兜底
 
 ## 开源依赖
 零新增(契约+llm+session+action+store 组合)。**cron 表达式自实现**(`src/cron.ts`,五段最小子集 ~120 行):`croner` 等库带完整时区/秒级/L-W 语法,而 tau 只需分钟粒度本地时区——引依赖的成本高于收益,且违背"不引入新依赖"。

@@ -13,6 +13,8 @@
 - `tau log|replay|export <sessionId>` - 观测(M9 支柱 B);`export --format jsonl|markdown [--out <path>]`
 - `tau sessions list|show|resume|archive|delete` - 会话治理(M9 支柱 C;delete = archive,不物理删;需 `--store` 才有持久记录)
 - `tau config list|get <k>|set <k> <v>|unset <k>` - 配置读写(落 store.kv,拒明文 secrets)
+- MCP:`TAU_MCP_SERVERS` JSON 声明 server 列表(stdio command/args 或 http url+headers,id 为工具名前缀);工具注册为 `mcp_<id>_<tool>` syscall,经 action.execute 审批/审计/截断(不绕行);每 server 可配 defaultRule(pattern 需通配,如 `mcp_demo_*`,装载进能力门,缺省 ask);注册先于 session 创建(投影 tools 快照含 MCP 工具)→ 生产走 composeAsync;进程退出前 `runtime.mcpDispose()` 关闭 client(stdio 子进程句柄不释放会阻塞退出)
+- 上下文压缩:compose 把 enhance.summarize 注入 scheduler 的 compact 策略(历史超预算自动摘要化,用户输入永不丢)
 - `tau schedule list|add <cron> <目标>|rm <id>|run [--dry-run]` - 定时目标(orchestrate cron 治理面;`run` 是一次性检查,由系统 cron 每分钟拉起,tau 不常驻守护进程)
 - `tau eval` - 运行行为评测(委托 eval 包)
 - `tau --version` / `-V` - 版本号(单二进制自证)
@@ -33,6 +35,7 @@
 | `src/main.ts` | 入口(Bun compile 目标) |
 | `src/cli.ts` | 参数解析 + 子命令路由 + doctor/观测/治理/配置/调度子命令 |
 | `src/compose.ts` | 依赖拼装(唯一) |
+| `src/mcp.ts` | MCP server 注册(surface 层 syscall 化;工具名转义 + defaultRule 注入 + callTool 适配) |
 | `scripts/build.ts` | 交叉编译单二进制(仓库根,非包内) |
 
 > 配置与 doctor 未单列模块:两者各百余行且只被 CLI 调用,拆包只会多一层间接。契约 Config schema 的装载/合并落地时再抽 `src/config.ts`。
@@ -44,6 +47,7 @@
 
 ## 开源依赖
 `@tau/*` 全包(含 `@tau/tui`——交互模式经动态 `import` 懒加载,但必须是声明依赖,否则单二进制打不进也 resolve 不到)。CLI 解析用 Bun 内建 `Bun.argv` + 手写路由(保持体积小)。
+- `@ai-sdk/mcp@^2`:MCP 客户端(MCP 工具经 syscall 通道接入,见上;`@modelcontextprotocol/sdk` 为其传递依赖,不直接引)
 
 ## 性能与算法
 - 毫秒级启动:Bun compile + 子命令懒加载(非交互路径不求值 TUI 模块;实测 `tau --version` ~38ms)

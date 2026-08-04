@@ -12,15 +12,16 @@
     "src"
   ],
   "dependencies": {
-    "@tau/contract": "workspace:*",
-    "@tau/llm": "workspace:*",
-    "@tau/session": "workspace:*",
+    "@ai-sdk/mcp": "^2.0.24",
     "@tau/action": "workspace:*",
-    "@tau/orchestrate": "workspace:*",
-    "@tau/surface": "workspace:*",
-    "@tau/store": "workspace:*",
-    "@tau/eval": "workspace:*",
+    "@tau/contract": "workspace:*",
     "@tau/enhance": "workspace:*",
+    "@tau/eval": "workspace:*",
+    "@tau/llm": "workspace:*",
+    "@tau/orchestrate": "workspace:*",
+    "@tau/session": "workspace:*",
+    "@tau/store": "workspace:*",
+    "@tau/surface": "workspace:*",
     "@tau/tui": "workspace:*"
   },
   "bin": {

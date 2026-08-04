@@ -4,7 +4,7 @@
 import { mkdirSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { homedir } from "node:os"
-import { compose } from "./compose.ts"
+import { applyRemoteCatalog, composeAsync } from "./compose.ts"
 import { createPrintRenderer } from "@tau/surface"
 import { createMemoryStore, createStore, type Store } from "@tau/store"
 import {
@@ -186,7 +186,20 @@ function openStore(storePath?: string): Store {
 }
 
 /** compose 的通用选项转发(含 --session)。 */
+function parseMcpServers(env: NodeJS.ProcessEnv): import("./mcp.ts").McpServerConfig[] | undefined {
+  const raw = env.TAU_MCP_SERVERS
+  if (raw === undefined || raw.trim() === "") return undefined
+  try {
+    const parsed = JSON.parse(raw) as import("./mcp.ts").McpServerConfig[]
+    return Array.isArray(parsed) ? parsed : undefined
+  } catch {
+    console.error("tau:TAU_MCP_SERVERS 不是合法 JSON,忽略 MCP 配置")
+    return undefined
+  }
+}
+
 function composeOpts(opts: CommonOpts, extra: { skipEnhancer?: boolean; store?: Store } = {}) {
+  const mcpServers = parseMcpServers(process.env)
   return {
     cwd: opts.workspace,
     workspaceRoots: [opts.workspace],
@@ -196,6 +209,7 @@ function composeOpts(opts: CommonOpts, extra: { skipEnhancer?: boolean; store?: 
     ...(opts.storePath !== undefined && extra.store === undefined ? { storePath: opts.storePath } : {}),
     ...(extra.store !== undefined ? { store: extra.store } : {}),
     ...(extra.skipEnhancer === true ? { skipEnhancer: true } : {}),
+    ...(mcpServers !== undefined && mcpServers.length > 0 ? { mcpServers } : {}),
   }
 }
 
@@ -211,7 +225,7 @@ async function printMode(rest: string[]): Promise<number> {
     return 2
   }
 
-  const runtime = compose(composeOpts(opts))
+  const runtime = await composeAsync(composeOpts(opts))
 
   // --json:逐事件 wire JSONL(机器消费,与 tau log 同格式);否则人类可读转述
   const renderer = opts.json ? null : createPrintRenderer({ showToolCalls: true })
@@ -232,6 +246,7 @@ async function printMode(rest: string[]): Promise<number> {
   }
   const tail = renderer?.flush() ?? ""
   if (tail !== "") console.log(tail)
+  await runtime.mcpDispose?.()
   return 0
 }
 
@@ -240,7 +255,14 @@ async function tuiMode(args: string[]): Promise<number> {
 
   const { createTui } = await import("@tau/tui")
 
-  const runtime = compose(composeOpts(opts))
+  const runtime = await composeAsync(composeOpts(opts))
+
+  // 远程目录增强(失败静默回退静态目录)
+  await applyRemoteCatalog(runtime.llm, {
+    onResult: (ok, count) => {
+      if (ok) console.error(`tau:已合并远程模型目录(+${count - runtime.llm.models().length} 新模型)`)
+    },
+  })
 
   const sender = { clientId: "tui", kind: "tui" as const }
   const tui = createTui({
@@ -264,7 +286,7 @@ async function serveMode(args: string[]): Promise<number> {
   const portIdx = args.indexOf("--port")
   const port = portIdx >= 0 && args[portIdx + 1] !== undefined ? Number(args[portIdx + 1]) : 3000
 
-  const runtime = compose(composeOpts(opts))
+  const runtime = await composeAsync(composeOpts(opts))
 
   const { serveHttp } = await import("@tau/surface")
   const server = serveHttp(
@@ -296,7 +318,7 @@ async function serveMode(args: string[]): Promise<number> {
 async function acpMode(args: string[]): Promise<number> {
   const opts = parseCommonOpts(args)
 
-  const runtime = compose(composeOpts(opts))
+  const runtime = await composeAsync(composeOpts(opts))
 
   const { runAcpServer } = await import("@tau/surface")
   console.error(`tau acp:ACP 服务器启动(JSON-RPC over stdio)`)
@@ -356,7 +378,7 @@ async function doctor(args: string[] = []): Promise<number> {
 
   // 4. capability 门生效(默认规则存在且可决策)
   try {
-    const runtime = compose(composeOpts(opts, { skipEnhancer: true }))
+    const runtime = await composeAsync(composeOpts(opts, { skipEnhancer: true }))
     const ruleCount = runtime.action.gate.rules.length
     const decision = runtime.action.gate.decide("bash", true)
     const ok = ruleCount > 0 && decision.rule !== undefined
@@ -474,7 +496,7 @@ function renderMessageMarkdown(msg: Message): string {
 const NO_STORE_HINT = "(内存 store 无持久记录;用 --store <path> 指向 SQLite 文件)"
 
 /** `tau sessions list|show|resume|archive|delete`。delete 走 archive:tau 不物理删会话。 */
-function sessionsMode(args: string[]): number {
+async function sessionsMode(args: string[]): Promise<number> {
   const opts = parseCommonOpts(args)
   const [action = "list", target] = positionals(args)
 
@@ -528,7 +550,7 @@ function sessionsMode(args: string[]): number {
       return 1
     }
     // 复用同一连接建 runtime:治理操作也要走 session,状态转移才有 lifecycle 事件可重放
-    const runtime = compose(composeOpts({ ...opts, sessionId: target }, { skipEnhancer: true, store }))
+    const runtime = await composeAsync(composeOpts({ ...opts, sessionId: target }, { skipEnhancer: true, store }))
     if (action === "resume") {
       runtime.session.resume()
       console.log(`tau sessions:${target} → active`)
@@ -708,7 +730,7 @@ async function scheduleMode(args: string[]): Promise<number> {
       let failed = 0
       for (const e of due) {
         // 目标经 session.setGoal 进投影(模型感知),再以 prompt 唤醒——不旁路拼 Context
-        const runtime = compose(composeOpts({ ...opts, sessionId: e.sessionId }, { store }))
+        const runtime = await composeAsync(composeOpts({ ...opts, sessionId: e.sessionId }, { store }))
         runtime.scheduler.goals.set(makeGoal(e.id, e.goalText))
         const result = await runtime.face.publish({
           kind: "prompt",
