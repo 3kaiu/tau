@@ -10,11 +10,13 @@ import { makeWriteTool } from "./tools/write.ts"
 import { makeBashTool, makeResultTool } from "./tools/bash.ts"
 import { PathBoundary } from "./tools/common.ts"
 
-export type { ActionPlane, ActionPlaneOptions, ExecuteRequest, ExecuteOutcome } from "./runtime.ts"
+export type { ActionPlane, ActionPlaneOptions, ExecuteRequest, ExecuteOutcome, PermissionRequest } from "./runtime.ts"
 export { ToolRegistry } from "./registry.ts"
 export { CapabilityGate, DEFAULT_RULES } from "./capability.ts"
 export { queryAudit, recordAudit } from "./audit.ts"
 export { PathBoundary, ResultPageStore } from "./tools/common.ts"
+export { createHookRegistry, auditHook, dangerousToolGate, rateLimitHook } from "./hooks.ts"
+export type { Hook, HookContext, HookPhase, HookRegistry } from "./hooks.ts"
 
 export function createActionPlane(store: Store, opts: ActionPlaneOptions = {}): ActionPlane {
   const plane = new ActionPlane(store, opts)

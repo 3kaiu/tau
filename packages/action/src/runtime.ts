@@ -7,6 +7,7 @@ import { toolError } from "@tau/contract"
 import { ToolRegistry } from "./registry.ts"
 import { CapabilityGate } from "./capability.ts"
 import { recordAudit } from "./audit.ts"
+import { createHookRegistry, type Hook, type HookContext } from "./hooks.ts"
 
 const SECRET_PATTERNS: readonly RegExp[] = [
   /-----BEGIN [A-Z ]+PRIVATE KEY-----/,
@@ -16,12 +17,22 @@ const SECRET_PATTERNS: readonly RegExp[] = [
 const BINARY_NUL = "\u0000"
 const MAX_RESULT_BYTES = 64 * 1024
 
+export type PermissionRequest = {
+  toolCallId: string
+  toolName: string
+  summary: string
+}
+
 export type ActionPlaneOptions = {
   /** 询问时自动批准(默认拒绝)。print 模式可经 CLI 开关打开。 */
   autoApprove?: boolean
   /** 会话工作区根(越界直接拒绝)。缺省 = 当前目录。 */
   workspaceRoots?: readonly string[]
   onEvent?: (event: Event) => void
+  /** 权限询问回调:返回 true 批准,false 拒绝。TUI 用此回调弹窗。 */
+  onPermission?: (req: PermissionRequest) => Promise<boolean>
+  /** 生命周期 hooks:工具执行前/后/错误时触发。 */
+  hooks?: readonly Hook[]
 }
 
 export type ExecuteRequest = {
@@ -42,11 +53,18 @@ export class ActionPlane {
   private readonly store: Store
   private readonly opts: ActionPlaneOptions
   private readonly executors = new Map<string, (req: ExecuteRequest) => Promise<ToolResult>>()
+  private readonly hooks = createHookRegistry()
   private writeQueue = Promise.resolve()
 
   constructor(store: Store, opts: ActionPlaneOptions = {}) {
     this.store = store
     this.opts = opts
+    // 注册初始 hooks
+    if (opts.hooks) {
+      for (const hook of opts.hooks) {
+        this.hooks.register(hook)
+      }
+    }
   }
 
   /** 注册执行器(内置工具或扩展),与 SystemCall 元数据成对。 */
@@ -54,8 +72,43 @@ export class ActionPlane {
     this.executors.set(name, fn)
   }
 
+  /** 运行期设置权限回调(TUI 创建后注入)。 */
+  setPermissionHandler(fn: (req: PermissionRequest) => Promise<boolean>): void {
+    this.opts.onPermission = fn
+  }
+
+  /** 注册生命周期 hook。返回取消注册函数。 */
+  registerHook(hook: Hook): () => void {
+    return this.hooks.register(hook)
+  }
+
   capabilities() {
     return { rules: this.gate.rules, workspaceRoots: this.opts.workspaceRoots ?? [process.cwd()] }
+  }
+
+  /** ask 工具的权限决策:onPermission 回调 > autoApprove > 拒绝。 */
+  private async resolveApproval(
+    req: ExecuteRequest,
+    syscall: { name: string; description: string },
+    started: number,
+    emit: (event: Omit<ToolEvent, "id" | "timestamp" | "redact">) => void,
+  ): Promise<boolean> {
+    const summary = brief(argsOf(req))
+
+    if (this.opts.onPermission !== undefined) {
+      const approved = await this.opts.onPermission({ toolCallId: req.toolCallId, toolName: req.name, summary })
+      const questionId = crypto.randomUUID()
+      this.opts.onEvent?.({ id: questionId, timestamp: new Date().toISOString(), redact: [], kind: "permission", requestId: req.toolCallId, toolName: req.name, summary, state: approved ? "granted" : "denied" } as Event)
+      recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: summary, outcome: approved ? "approved" : "rejected", durationMs: Date.now() - started })
+      return approved
+    }
+
+    if (this.opts.autoApprove === true) return true
+
+    const error = toolError("rejected", `${req.name} 需要授权(capability 规则 ask);请显式开启 autoApprove 或配置 allow 规则`)
+    emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "failed", args: req.args, error })
+    recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: summary, outcome: "rejected", durationMs: Date.now() - started })
+    return false
   }
 
   async execute(req: ExecuteRequest, opts: { timeoutMs?: number } = {}): Promise<ExecuteOutcome> {
@@ -79,12 +132,8 @@ export class ActionPlane {
       return { ok: false, error }
     }
     if (decision.rule === "ask") {
-      if (this.opts.autoApprove !== true) {
-        const error = toolError("rejected", `${req.name} 需要授权(capability 规则 ask);请显式开启 autoApprove 或配置 allow 规则`)
-        emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "failed", args: req.args, error })
-        recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: brief(argsOf(req)), outcome: "rejected", durationMs: Date.now() - started })
-        return { ok: false, error }
-      }
+      const approved = await this.resolveApproval(req, syscall, started, emit)
+      if (!approved) return { ok: false, error: toolError("rejected", `${req.name} 权限被拒绝`) }
     }
 
     const executor = this.executors.get(req.name)
@@ -94,15 +143,55 @@ export class ActionPlane {
       return { ok: false, error }
     }
 
+    // 执行 before hooks
+    const beforeCtx: HookContext = {
+      sessionId: req.sessionId,
+      toolCallId: req.toolCallId,
+      syscall,
+      args: req.args,
+      phase: "before",
+    }
+    try {
+      await this.hooks.execute(beforeCtx)
+    } catch (hookErr) {
+      const error = toolError("rejected", `hook 阻止执行: ${hookErr instanceof Error ? hookErr.message : String(hookErr)}`)
+      emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "failed", args: req.args, error })
+      recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: brief(argsOf(req)), outcome: "rejected", durationMs: Date.now() - started })
+      return { ok: false, error }
+    }
+
     emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "started", args: req.args })
     try {
       const exec = syscall.tier === "T0" ? this.enqueue(() => executor(req)) : executor(req)
       const result = opts.timeoutMs === undefined ? await exec : await withTimeoutMs(exec, opts.timeoutMs)
       const marked = markSecrets(result)
+
+      // 执行 after hooks
+      const afterCtx: HookContext = {
+        sessionId: req.sessionId,
+        toolCallId: req.toolCallId,
+        syscall,
+        args: req.args,
+        phase: "after",
+        result: marked.result as Record<string, unknown>,
+      }
+      await this.hooks.execute(afterCtx)
+
       emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "completed", result: marked.result })
       recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: brief(argsOf(req)), outcome: marked.hasSecret ? "ok" : "ok", durationMs: Date.now() - started })
       return { ok: true, result: marked.result }
     } catch (err) {
+      // 执行 error hooks
+      const errorCtx: HookContext = {
+        sessionId: req.sessionId,
+        toolCallId: req.toolCallId,
+        syscall,
+        args: req.args,
+        phase: "error",
+        error: err instanceof Error ? err : new Error(String(err)),
+      }
+      await this.hooks.execute(errorCtx)
+
       const error = normalizeError(err)
       emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "failed", error })
       recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: brief(argsOf(req)), outcome: "error", durationMs: Date.now() - started })

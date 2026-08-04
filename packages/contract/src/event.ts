@@ -105,6 +105,15 @@ export const RecoveryEventSchema = EventBaseSchema.extend({
 })
 export type RecoveryEvent = z.infer<typeof RecoveryEventSchema>
 
+export const GoalEventSchema = EventBaseSchema.extend({
+  kind: z.literal("goal"),
+  goalId: z.string(),
+  status: z.enum(["completed", "blocked", "progress"]),
+  progress: z.number().min(0).max(1),
+  reason: z.string(),
+})
+export type GoalEvent = z.infer<typeof GoalEventSchema>
+
 /** Event 封闭联合:新增分支必须同时改本联合与 invariant 检查器(编译期穷尽)。 */
 export const EventSchema = z.discriminatedUnion("kind", [
   InputAcceptedEventSchema,
@@ -119,6 +128,7 @@ export const EventSchema = z.discriminatedUnion("kind", [
   ModelSwitchedEventSchema,
   InterruptedEventSchema,
   RecoveryEventSchema,
+  GoalEventSchema,
 ])
 export type Event = z.infer<typeof EventSchema>
 

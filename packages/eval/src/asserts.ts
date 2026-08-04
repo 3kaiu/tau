@@ -345,7 +345,133 @@ const assert13: Assert = {
   },
 }
 
+// ---------- 14. Goals 判定 ----------
+
+const assert14: Assert = {
+  id: 14,
+  name: "Goals 判定",
+  description: "设置目标后,每 turn 后校验,完成时发 goal 事件",
+  async run() {
+    const f = createFixture({
+      script: {
+        replies: [
+          textReply("已完成目标"),
+        ],
+      },
+    })
+    f.session.setGoal({
+      id: "g1",
+      text: "测试目标",
+      status: "active",
+      progress: 0,
+      strategy: "llm_judged",
+      checklist: [],
+      createdAt: new Date().toISOString(),
+    })
+    await runTurn(f, "执行任务")
+    const goalEvents = f.events.filter((e) => e.kind === "goal")
+    if (goalEvents.length === 0) throw new Error("缺 goal 事件(目标判定应触发)")
+    const completed = goalEvents.find((e) => e.kind === "goal" && e.status === "completed")
+    if (completed === undefined) throw new Error("目标未标记为 completed(助手回复含'已完成')")
+    f.cleanup()
+  },
+}
+
+// ---------- 15. 生命周期 hooks ----------
+
+const assert15: Assert = {
+  id: 15,
+  name: "生命周期 hooks",
+  description: "before/after/error hooks 按序触发",
+  async run() {
+    const fs = await import("node:fs")
+    const tmpDir = `/tmp/tau-eval-hooks-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    fs.mkdirSync(tmpDir, { recursive: true })
+    const testFile = `${tmpDir}/test.txt`
+    fs.writeFileSync(testFile, "test content")
+
+    const logs: string[] = []
+    const f = createFixture({
+      script: {
+        replies: [
+          toolReply([{ id: "c1", name: "read", args: { path: testFile } }]),
+          textReply("done"),
+        ],
+      },
+      cwd: tmpDir,
+      workspaceRoots: [tmpDir],
+    })
+    f.action.registerHook((ctx) => {
+      logs.push(`${ctx.phase}:${ctx.syscall.name}`)
+    })
+    await runTurn(f, "读文件")
+    const hasBefore = logs.some((l) => l.startsWith("before:"))
+    const hasAfter = logs.some((l) => l.startsWith("after:"))
+    if (!hasBefore) throw new Error("缺 before hook 触发")
+    if (!hasAfter) throw new Error("缺 after hook 触发")
+    const beforeIdx = logs.findIndex((l) => l.startsWith("before:"))
+    const afterIdx = logs.findIndex((l) => l.startsWith("after:"))
+    if (beforeIdx >= afterIdx) throw new Error("before 应在 after 之前")
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+    f.cleanup()
+  },
+}
+
+// ---------- 16. Multi-run ----------
+
+const assert16: Assert = {
+  id: 16,
+  name: "Multi-run",
+  description: "多模型并行执行,收集所有结果",
+  async run() {
+    const { runMultiRun, selectBestRun } = await import("@tau/orchestrate")
+    const f = createFixture({
+      script: {
+        replies: [textReply("result from model")],
+      },
+    })
+    const result = await runMultiRun(
+      { llm: f.llm, session: f.session, action: f.action },
+      { models: ["model-a", "model-b"], task: "test task", maxConcurrent: 2 },
+    )
+    if (result.runs.length !== 2) throw new Error(`期望 2 个 run,实际 ${result.runs.length}`)
+    const best = selectBestRun(result.runs)
+    if (best === null) throw new Error("selectBestRun 返回 null")
+    if (!["model-a", "model-b"].includes(best.model)) throw new Error(`best model 不符: ${best.model}`)
+    f.cleanup()
+  },
+}
+
+// ---------- 17. 插件市场 ----------
+
+const assert17: Assert = {
+  id: 17,
+  name: "插件市场",
+  description: "插件注册表:安装/卸载/查询/信任级别",
+  async run() {
+    const { createTrustedPluginRegistry, createPlugin } = await import("@tau/enhance")
+    const registry = createTrustedPluginRegistry()
+    const plugin = createPlugin(
+      { name: "test-plugin", version: "1.0.0", description: "Test plugin" },
+      new Map([["skill1", "skill content"]]),
+      new Map(),
+      new Map(),
+    )
+    registry.install(plugin, "verified")
+    const list = registry.list()
+    if (list.length !== 1) throw new Error(`期望 1 个插件,实际 ${list.length}`)
+    const retrieved = registry.get("test-plugin")
+    if (retrieved === undefined) throw new Error("查询插件失败")
+    if (retrieved.trustLevel !== "verified") throw new Error(`信任级别不符: ${retrieved.trustLevel}`)
+    const uninstalled = registry.uninstall("test-plugin")
+    if (!uninstalled) throw new Error("卸载失败")
+    const afterUninstall = registry.list()
+    if (afterUninstall.length !== 0) throw new Error("卸载后仍有插件")
+  },
+}
+
 export const allAsserts: readonly Assert[] = [
   assert1, assert2, assert3, assert4, assert5, assert6,
   assert7, assert8, assert9, assert10, assert11, assert12, assert13,
+  assert14, assert15, assert16, assert17,
 ]

@@ -6,6 +6,7 @@ import type { Event, Goal, Message } from "@tau/contract"
 import type { LlmKernel, LlmCollectResult, LlmRequest } from "@tau/llm"
 import type { Session } from "@tau/session"
 import type { ActionPlane } from "@tau/action"
+import { GoalJudge } from "./goals.ts"
 
 export type SchedulerDeps = {
   llm: LlmKernel
@@ -22,6 +23,8 @@ export type SchedulerOptions = {
   loopGuard?: number
   model?: string
   onEvent?: (event: Event) => void
+  /** Goal 判定配置:每 turn 后校验目标,未完成继续。 */
+  goalJudge?: GoalJudge
 }
 
 export type SchedulerInput = {
@@ -68,6 +71,7 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
   const maxToolCallsPerTurn = options.maxToolCallsPerTurn ?? 24
   const maxRetries = options.maxRetries ?? 2
   const loopGuard = options.loopGuard ?? 3
+  const goalJudge = options.goalJudge ?? new GoalJudge()
 
   const listeners = new Set<(event: Event) => void>()
   const fingerprints = new Map<string, number>()
@@ -186,6 +190,19 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
       if (calls.length === 0) break
       if (myEpoch !== steerEpoch) break
     }
+
+    // Goal 判定:每 turn 后校验目标,未完成继续
+    const activeGoal = session.snapshot().activeGoals.find((g) => g.status === "active")
+    if (activeGoal) {
+      const judgeResult = await goalJudge.judge(activeGoal, session)
+      goalJudge.updateGoal(session, activeGoal, judgeResult)
+      if (judgeResult.status === "completed") {
+        emitRaw({ kind: "goal", goalId: activeGoal.id, status: "completed", progress: 1.0, reason: judgeResult.reason })
+      } else if (judgeResult.status === "blocked") {
+        emitRaw({ kind: "goal", goalId: activeGoal.id, status: "blocked", progress: judgeResult.progress, reason: judgeResult.reason })
+      }
+    }
+
     if (turns >= maxTurns) {
       emitRaw({ kind: "budget_exceeded", metric: "maxTurns", used: turns, limit: maxTurns })
     }
