@@ -4,7 +4,8 @@
 import { z } from "zod"
 import type { ToolTier } from "./model.ts"
 
-/** 错误码必填。模型的分诊依据:retryable→重试;not_found→换工具;permission_denied/rejected→问用户;其余→上报。 */
+/** 错误码必填。模型的分诊依据:retryable→重试;not_found→换工具;permission_denied/rejected→问用户;
+ * insufficient_funds→报账(余额不足,重试无益);overloaded→资源不足(错峰重试);其余→上报。 */
 export const ErrorCodeSchema = z.enum([
   "retryable",
   "not_found",
@@ -12,6 +13,8 @@ export const ErrorCodeSchema = z.enum([
   "timeout",
   "cancelled",
   "rejected",
+  "insufficient_funds",
+  "overloaded",
   "internal",
 ])
 export type ErrorCode = z.infer<typeof ErrorCodeSchema>
@@ -23,8 +26,16 @@ export const ToolErrorSchema = z.object({
 })
 export type ToolError = z.infer<typeof ToolErrorSchema>
 
+/** 文件类结果的元数据:模型判断"我读的文件是否已被改过"(陈旧 → 重读),也是幂等判定依据。 */
+export const FileMetaSchema = z.object({
+  mtime: z.string(),
+  size: z.number().int().nonnegative(),
+  hash: z.string().optional(),
+})
+export type FileMeta = z.infer<typeof FileMetaSchema>
+
 /** ToolResult:stdout/stderr 分离;截断带分页标记,续读走 result:page 协议,不整段重灌。
- * exitCode 为 null 表示工具无进程语义(如纯数据查询)。 */
+ * exitCode 为 null 表示工具无进程语义(如纯数据查询);文件类结果必填 fileMeta。 */
 export const ToolResultSchema = z.object({
   exitCode: z.number().int().nullable().default(null),
   stdout: z.string().nullable().default(null),
@@ -32,8 +43,28 @@ export const ToolResultSchema = z.object({
   truncated: z.boolean().default(false),
   totalPages: z.number().int().min(0).default(1),
   page: z.number().int().min(0).default(0),
+  fileMeta: FileMetaSchema.optional(),
 })
 export type ToolResult = z.infer<typeof ToolResultSchema>
+
+/** 危险命令模式清单(契约级):action 的 bash 检测与 eval 断言共用。
+ * 定位:检测是防线不是安全边界——降低误执行率,不承诺对抗绕过。 */
+export const DANGEROUS_COMMAND_PATTERNS: readonly RegExp[] = [
+  /\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+).*(\/|\*)/,
+  /\bgit\s+push\b.*--force/,
+  /\bsudo\b/,
+  /\b(curl|wget)\b[^|]*\|\s*(sh|bash)/,
+  /\bmkfs\b/,
+  /\bdd\s+.*of=\/dev\//,
+  /:\(\)\s*\{\s*:\|:\s*&\s*\}\s*;:/,
+  /\bchmod\s+(-[a-zA-Z]*\s+)?777\s+\//,
+  />\s*\/dev\/sd[a-z]/,
+]
+
+/** bash 参数过危险命令模式检测:命中 → 强制询问(与 capability 门叠加,不走静默允许)。 */
+export function isDangerousCommand(command: string): boolean {
+  return DANGEROUS_COMMAND_PATTERNS.some((re) => re.test(command))
+}
 
 /** 续读协议工具:截断结果按页续读。工具名与参数名是 wire 契约,不可改。 */
 export const RESULT_PAGE_TOOL_NAME = "result"
@@ -63,7 +94,7 @@ export type SystemCall = z.infer<typeof SystemCallSchema>
 
 /** 工具结果构造器:分页/分离字段给默认,调用方只写实际数据。 */
 export function toolResult(result: Partial<ToolResult> = {}): ToolResult {
-  return {
+  const base: ToolResult = {
     exitCode: result.exitCode ?? null,
     stdout: result.stdout ?? null,
     stderr: result.stderr ?? null,
@@ -71,6 +102,7 @@ export function toolResult(result: Partial<ToolResult> = {}): ToolResult {
     totalPages: result.totalPages ?? 1,
     page: result.page ?? 0,
   }
+  return result.fileMeta === undefined ? base : { ...base, fileMeta: result.fileMeta }
 }
 
 export function toolError(code: ErrorCode, message: string, details?: Record<string, unknown>): ToolError {

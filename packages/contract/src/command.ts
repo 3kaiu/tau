@@ -38,6 +38,10 @@ export const ApproveCommandSchema = z.object({
 })
 export type ApproveCommand = z.infer<typeof ApproveCommandSchema>
 
+/** 批准生命周期状态机:孤儿挂起(会话 abort 残留 pending)与超时过期有明确归宿,审批链可审计。 */
+export const ApprovalStateSchema = z.enum(["active", "approved", "denied", "expired", "revoked"])
+export type ApprovalState = z.infer<typeof ApprovalStateSchema>
+
 /** deny 与 ApprovalState.denied 一一对应:用户/客户端显式拒绝某权限请求。 */
 export const DenyCommandSchema = z.object({
   kind: z.literal("deny"),

@@ -8,6 +8,8 @@ export type LlmUsage = {
   completionTokens: number
   totalTokens: number
   reasoningTokens?: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
 }
 
 export type LlmEvent =
@@ -21,27 +23,35 @@ export type LlmEvent =
   | { type: "aborted" }
   | { type: "model-switched"; from: string; to: string }
 
-/** AI SDK fullStream 部分的宽结构(跨版本兼容:textDelta/argsTextDelta 命名漂移)。 */
+/** AI SDK fullStream 部分的宽结构(跨版本兼容:textDelta/argsTextDelta 命名漂移)。
+ * ai@7 契约:tool-call 增量 = tool-input-delta(delta);finish 用量 = totalUsage。 */
 export type AiStreamPart = {
   type: string
   textDelta?: string
   text?: string
   argsTextDelta?: string
   argsDelta?: string
+  delta?: string
   toolCallId?: string
   toolName?: string
   args?: unknown
+  input?: unknown
   finishReason?: string
   usage?: Partial<LlmUsage>
+  totalUsage?: Partial<LlmUsage>
   error?: unknown
   value?: unknown
 }
 
-/** 错误码映射:429/5xx/超时 → retryable;400/401/404 → 不可重试(换工具/问用户)。 */
+/** 错误码映射:429/5xx/超时 → retryable;400/401/404 → 不可重试(换工具/问用户);
+ * 402 → insufficient_funds(DeepSeek 等以 402 表余额不足);insufficient_system_resource → overloaded。 */
 export function errorCodeOf(error: unknown): { code: ErrorCode; retryable: boolean } {
   const anyError = error as { statusCode?: unknown; status?: unknown; isTimeout?: unknown; name?: unknown; message?: string }
   if (anyError?.isTimeout === true) return { code: "timeout", retryable: true }
   const status = Number(anyError?.statusCode ?? anyError?.status ?? 0)
+  if (status === 402) return { code: "insufficient_funds", retryable: false }
+  const message = anyError?.message ?? ""
+  if (/insufficient_system_resource|overloaded|资源不足|繁忙/i.test(message)) return { code: "overloaded", retryable: true }
   if (status === 429) return { code: "retryable", retryable: true }
   if (status >= 500 && status < 600) return { code: "retryable", retryable: true }
   if (status === 401 || status === 403) return { code: "permission_denied", retryable: false }
@@ -62,6 +72,22 @@ function usageOf(usage: Partial<LlmUsage> | undefined): LlmUsage {
     completionTokens: usage?.completionTokens ?? 0,
     totalTokens: usage?.totalTokens ?? 0,
     ...(usage?.reasoningTokens !== undefined ? { reasoningTokens: usage.reasoningTokens } : {}),
+    ...(usage?.cacheReadTokens !== undefined ? { cacheReadTokens: usage.cacheReadTokens } : {}),
+    ...(usage?.cacheWriteTokens !== undefined ? { cacheWriteTokens: usage.cacheWriteTokens } : {}),
+  }
+}
+
+/** ai@7 LanguageModelUsage(inputTokens/outputTokens 嵌套)→ 归一 LlmUsage。 */
+export function usageOfV4(usage: { inputTokens?: { total?: number; noCache?: number; cacheRead?: number; cacheWrite?: number }; outputTokens?: { total?: number; reasoning?: number; text?: number } } | undefined): LlmUsage {
+  const input = usage?.inputTokens
+  const output = usage?.outputTokens
+  return {
+    promptTokens: input?.total ?? 0,
+    completionTokens: output?.total ?? 0,
+    totalTokens: (input?.total ?? 0) + (output?.total ?? 0),
+    ...(output?.reasoning !== undefined ? { reasoningTokens: output.reasoning } : {}),
+    ...(input?.cacheRead !== undefined ? { cacheReadTokens: input.cacheRead } : {}),
+    ...(input?.cacheWrite !== undefined ? { cacheWriteTokens: input.cacheWrite } : {}),
   }
 }
 
@@ -75,18 +101,18 @@ export async function* normalizeStream(parts: AsyncIterable<AiStreamPart>, signa
       }
       switch (part.type) {
         case "text-delta": {
-          const text = part.textDelta ?? part.text ?? ""
+          const text = part.text ?? part.textDelta ?? ""
           if (text !== "") yield { type: "text-delta", text }
           break
         }
-        case "reasoning":
         case "reasoning-delta": {
-          const text = part.textDelta ?? part.text ?? ""
+          const text = part.text ?? part.textDelta ?? ""
           if (text !== "") yield { type: "thinking-delta", text }
           break
         }
+        case "tool-input-delta":
         case "tool-call-delta": {
-          const delta = part.argsTextDelta ?? part.argsDelta ?? ""
+          const delta = part.delta ?? part.argsTextDelta ?? part.argsDelta ?? ""
           if (delta !== "" && part.toolCallId && part.toolName) {
             yield { type: "tool-call-delta", id: part.toolCallId, name: part.toolName, argsDelta: delta }
           }
@@ -94,8 +120,7 @@ export async function* normalizeStream(parts: AsyncIterable<AiStreamPart>, signa
         }
         case "tool-call": {
           if (part.toolCallId && part.toolName) {
-            const ai6 = part as unknown as { input?: unknown; args?: unknown }
-            yield { type: "tool-call", id: part.toolCallId, name: part.toolName, args: ai6.input ?? ai6.args ?? {} }
+            yield { type: "tool-call", id: part.toolCallId, name: part.toolName, args: part.input ?? part.args ?? {} }
           }
           break
         }
@@ -103,7 +128,7 @@ export async function* normalizeStream(parts: AsyncIterable<AiStreamPart>, signa
           yield {
             type: "finish",
             finishReason: part.finishReason ?? "unknown",
-            usage: usageOf(part.usage),
+            usage: part.totalUsage ? usageOfV4(part.totalUsage as Parameters<typeof usageOfV4>[0]) : usageOf(part.usage),
           }
           return
         }
@@ -112,8 +137,13 @@ export async function* normalizeStream(parts: AsyncIterable<AiStreamPart>, signa
           yield { type: "error", code, message: errorMessage(part.error), retryable }
           return
         }
-        case "step-start":
-        case "step-finish":
+        case "reasoning-start":
+        case "reasoning-end":
+        case "tool-input-start":
+        case "tool-input-end":
+        case "start-step":
+        case "finish-step":
+        case "abort":
         case "start":
           break
         default:

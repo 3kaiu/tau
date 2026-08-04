@@ -72,6 +72,14 @@ export const SelfModelSchema = z.object({
 })
 export type SelfModel = z.infer<typeof SelfModelSchema>
 
+/** 会话身份:子会话/多会话下模型知道"我是谁、父是谁"。 */
+export const SessionIdentitySchema = z.object({
+  id: z.string(),
+  title: z.string().optional(),
+  parentId: z.string().optional(),
+})
+export type SessionIdentity = z.infer<typeof SessionIdentitySchema>
+
 /** 模型自省块——缺一即违宪。permissions 只带三态规则摘要,完整规则经 `system` syscall 返回。 */
 export const SelfSchema = z.object({
   model: SelfModelSchema,
@@ -82,6 +90,7 @@ export const SelfSchema = z.object({
   git: GitStatusSchema.optional(),
   permissions: z.array(CapabilityRuleSchema).default([]),
   skills: SkillDirSchema.default({ names: [] }),
+  session: SessionIdentitySchema,
 })
 export type Self = z.infer<typeof SelfSchema>
 

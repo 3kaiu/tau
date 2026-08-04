@@ -10,8 +10,13 @@
   },
   "files": ["src"],
   "dependencies": {
-    "@ai-sdk/openai-compatible": "2.0.63",
+    "@ai-sdk/alibaba": "^2.0.24",
+    "@ai-sdk/anthropic": "4.0.29",
+    "@ai-sdk/deepseek": "^3.0.21",
+    "@ai-sdk/minimax": "^3.0.5",
+    "@ai-sdk/moonshotai": "^3.0.25",
+    "@ai-sdk/openai-compatible": "3.0.22",
     "@tau/contract": "workspace:*",
-    "ai": "6.0.168"
+    "ai": "7.0.51"
   }
 }

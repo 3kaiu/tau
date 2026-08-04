@@ -53,5 +53,7 @@ export const ModelSchema = z.object({
   capabilities: z.preprocess((v) => (v === undefined ? {} : v), ModelCapabilitiesSchema),
   cost: CostSchema,
   contextWindow: ContextWindowSchema,
+  /** 降级链:失败后按序下探的备选模型 id(声明式,非启发式);空数组 = 无降级。 */
+  fallback: z.array(z.string()).default([]),
 })
 export type Model = z.infer<typeof ModelSchema>

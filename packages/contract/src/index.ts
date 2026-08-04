@@ -9,6 +9,7 @@ import { CommandSchema } from "./command.ts"
 import { EventSchema } from "./event.ts"
 import { GoalSchema } from "./goal.ts"
 import { SessionSnapshotSchema } from "./session.ts"
+import { ConfigSchema } from "./config.ts"
 
 export const version = "0.0.1"
 
@@ -19,6 +20,7 @@ export * from "./command.ts"
 export * from "./event.ts"
 export * from "./goal.ts"
 export * from "./session.ts"
+export * from "./config.ts"
 export * from "./invariant.ts"
 
 /** 契约 schema 注册表:模块加载时编译一次,热路径校验复用同一实例(zod 内部缓存)。 */
@@ -34,6 +36,7 @@ export const contractSchemas = {
   SessionSnapshot: SessionSnapshotSchema,
   Resources: ResourcesSchema,
   Self: SelfSchema,
+  Config: ConfigSchema,
 } as const
 
 export type ContractSchemaName = keyof typeof contractSchemas

@@ -31,6 +31,7 @@ const FAUX_MODEL: Model = {
   capabilities: { supportsTools: true, supportsThinking: false, supportsParallelCalls: true, supportsVision: false, supportsStreaming: true },
   cost: { inputPerMillion: 0, outputPerMillion: 0 },
   contextWindow: { maxTokens: 128_000 },
+  fallback: [],
 }
 
 const FAUX_CACHE: CachePolicy = "none"

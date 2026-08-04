@@ -132,6 +132,14 @@ export const EventSchema = z.discriminatedUnion("kind", [
 ])
 export type Event = z.infer<typeof EventSchema>
 
+/** 事件 id 生成器:进程内单调序列 + 进程前缀;序号定宽补零,字典序 = 因果序。
+ * 跨源/跨进程排序按 (epoch, id) 字典序;权威写入侧(session/action)各自持有一个实例。 */
+export function createEventIdGenerator(prefix?: string): () => string {
+  const p = prefix ?? `p${Math.random().toString(36).slice(2, 8)}`
+  let counter = 0
+  return () => `${p}-${String(++counter).padStart(12, "0")}`
+}
+
 /** 需进投影"最近活动块"的事件种类(模型必须看到自己刚被打断/重试/换模型)。 */
 export const RECENT_ACTIVITY_KINDS = ["retry", "interrupted", "model_switched", "recovery", "compression"] as const
 export type RecentActivityKind = (typeof RECENT_ACTIVITY_KINDS)[number]

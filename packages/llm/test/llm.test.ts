@@ -13,10 +13,12 @@ import {
 import {
   assembleSystem,
   cacheHitRate,
+  chatOptionsFor,
   collectStream,
   createLlmKernel,
   defaultCatalog,
   errorCodeOf,
+  modelsApiToCatalog,
   normalizeStream,
   promptCache,
   recordCacheHit,
@@ -50,6 +52,7 @@ function projection(history: Message[] = []): ContextProjection {
       cwd: "/tmp",
       permissions: [],
       skills: {},
+      session: { id: "test" },
     },
     resources: {
       maxConcurrentTurns: 1,
@@ -154,12 +157,12 @@ describe("toToolSet", () => {
 describe("normalizeStream", () => {
   it("text/reasoning/tool-call 增量 → LlmEvent,finish 收尾", async () => {
     const parts = [
-      { type: "text-delta", textDelta: "你" },
-      { type: "text-delta", textDelta: "好" },
-      { type: "reasoning", textDelta: "想" },
-      { type: "tool-call-delta", toolCallId: "c1", toolName: "bash", argsTextDelta: "{\"c" },
-      { type: "tool-call", toolCallId: "c1", toolName: "bash", args: { command: "ls" } },
-      { type: "finish", finishReason: "tool-calls", usage: { promptTokens: 10, completionTokens: 20, totalTokens: 30 } },
+      { type: "text-delta", text: "你" },
+      { type: "text-delta", text: "好" },
+      { type: "reasoning-delta", text: "想" },
+      { type: "tool-input-delta", toolCallId: "c1", toolName: "bash", delta: '{"c' },
+      { type: "tool-call", toolCallId: "c1", toolName: "bash", input: { command: "ls" } },
+      { type: "finish", finishReason: "tool-calls", totalUsage: { inputTokens: { total: 10, noCache: 6, cacheRead: 4 }, outputTokens: { total: 20, reasoning: 5, text: 15 } } },
     ]
     const events = []
     for await (const e of normalizeStream(parts as AsyncIterable<never>)) events.push(e)
@@ -169,7 +172,7 @@ describe("normalizeStream", () => {
       { type: "thinking-delta", text: "想" },
       { type: "tool-call-delta", id: "c1", name: "bash", argsDelta: '{"c' },
       { type: "tool-call", id: "c1", name: "bash", args: { command: "ls" } },
-      { type: "finish", finishReason: "tool-calls", usage: { promptTokens: 10, completionTokens: 20, totalTokens: 30 } },
+      { type: "finish", finishReason: "tool-calls", usage: { promptTokens: 10, completionTokens: 20, totalTokens: 30, reasoningTokens: 5, cacheReadTokens: 4 } },
     ])
   })
 
@@ -217,6 +220,133 @@ describe("errorCodeOf", () => {
     expect(errorCodeOf({ isTimeout: true })).toEqual({ code: "timeout", retryable: true })
     expect(errorCodeOf({ statusCode: 500 })).toEqual({ code: "retryable", retryable: true })
     expect(errorCodeOf({ name: "AbortError" })).toEqual({ code: "cancelled", retryable: false })
+  })
+
+  it("402 → insufficient_funds;insufficient_system_resource → overloaded", () => {
+    expect(errorCodeOf({ statusCode: 402, message: "balance insufficient" })).toEqual({ code: "insufficient_funds", retryable: false })
+    expect(errorCodeOf({ statusCode: 503, message: "insufficient_system_resource" })).toEqual({ code: "overloaded", retryable: true })
+  })
+})
+
+describe("chatOptionsFor", () => {
+  const meta = (api: string) => ({ api, provider: api, auth: "apiKey" as const })
+
+  it("deepseek:thinking + reasoningEffort 映射", () => {
+    expect(chatOptionsFor(meta("deepseek"), { thinking: true, reasoningEffort: "high" })).toEqual({
+      deepseek: { thinking: { type: "enabled" }, reasoningEffort: "high" },
+    })
+    expect(chatOptionsFor(meta("deepseek"), { thinking: false })).toEqual({ deepseek: { thinking: { type: "disabled" } } })
+  })
+
+  it("zai:thinking 透传且 clear_thinking 固定 false", () => {
+    expect(chatOptionsFor(meta("zai"), { thinking: true })).toEqual({ zai: { thinking: { type: "enabled", clear_thinking: false } } })
+  })
+
+  it("alibaba/moonshot/minimax 各自形状", () => {
+    expect(chatOptionsFor(meta("alibaba"), { thinking: true })).toEqual({ alibaba: { enableThinking: true } })
+    expect(chatOptionsFor(meta("moonshot"), { thinking: true, thinkingBudgetTokens: 2048 })).toEqual({
+      moonshot: { thinking: { type: "enabled", budgetTokens: 2048 } },
+    })
+    expect(chatOptionsFor(meta("minimax"), { thinking: true })).toEqual({ minimax: { thinking: { type: "adaptive" } } })
+  })
+
+  it("anthropic:enabled+budgetTokens;kimi-coding:adaptive+summarized+effort", () => {
+    expect(chatOptionsFor(meta("anthropic"), { thinking: true, thinkingBudgetTokens: 8192 })).toEqual({
+      anthropic: { thinking: { type: "enabled", budgetTokens: 8192 } },
+    })
+    expect(chatOptionsFor(meta("kimi-coding"), { thinking: true })).toEqual({
+      anthropic: { thinking: { type: "adaptive", display: "summarized" }, effort: "high" },
+    })
+    expect(chatOptionsFor(meta("kimi-coding"), { thinking: false })).toEqual({
+      anthropic: { thinking: { type: "disabled", display: "summarized" } },
+    })
+  })
+
+  it("未声明思考或通道无适配 → undefined", () => {
+    expect(chatOptionsFor(meta("deepseek"), {})).toBeUndefined()
+    expect(chatOptionsFor(meta("openai-compatible"), { thinking: true })).toBeUndefined()
+  })
+})
+
+describe("modelsApiToCatalog", () => {
+  it("只映射已注册通道;能力/成本/上下文窗口映射", () => {
+    const catalog = modelsApiToCatalog({
+      deepseek: {
+        id: "deepseek",
+        env: ["DEEPSEEK_API_KEY"],
+        npm: "@ai-sdk/deepseek",
+        api: "https://api.deepseek.com",
+        models: {
+          "deepseek-v4-flash": {
+            id: "deepseek-v4-flash",
+            reasoning: true,
+            reasoning_options: [{ type: "toggle" }, { type: "effort", values: ["high", "max"] }],
+            tool_call: true,
+            attachment: false,
+            limit: { context: 1_000_000, output: 384_000 },
+            cost: { input: 0.14, output: 0.28, cache_read: 0.0028 },
+          },
+        },
+      },
+      "kimi-for-coding": {
+        id: "kimi-for-coding",
+        env: ["KIMI_API_KEY"],
+        npm: "@ai-sdk/anthropic",
+        api: "https://api.kimi.com/coding/v1",
+        models: { "kimi-for-coding": { id: "kimi-for-coding", reasoning: true, tool_call: true, limit: { context: 262144, output: 32768 } } },
+      },
+      "zai-coding-plan": {
+        id: "zai-coding-plan",
+        env: ["ZHIPU_API_KEY"],
+        npm: "@ai-sdk/openai-compatible",
+        api: "https://api.z.ai/api/coding/paas/v4",
+        models: { "glm-5.2": { id: "glm-5.2", reasoning: true, tool_call: true, limit: { context: 204800 } } },
+      },
+      "unsupported-provider": {
+        id: "unsupported-provider",
+        npm: "@some-unknown-sdk",
+        models: { x: { id: "x" } },
+      },
+    })
+    expect(catalog).toHaveLength(3)
+    const ds = catalog.find((m) => m.id === "deepseek-v4-flash")!
+    expect(ds.provider).toMatchObject({ api: "deepseek", baseUrl: "https://api.deepseek.com", envKey: "DEEPSEEK_API_KEY" })
+    expect(ds.capabilities.supportsThinking).toBe(true)
+    expect(ds.cost).toEqual({ inputPerMillion: 0.14, outputPerMillion: 0.28, cacheReadPerMillion: 0.0028 })
+    expect(ds.contextWindow).toEqual({ maxTokens: 1_000_000, maxOutputTokens: 384_000 })
+    const kimi = catalog.find((m) => m.id === "kimi-for-coding")!
+    expect(kimi.provider.api).toBe("kimi-coding")
+    const glm = catalog.find((m) => m.id === "glm-5.2")!
+    expect(glm.provider).toMatchObject({ api: "zai", baseUrl: "https://api.z.ai/api/coding/paas/v4" })
+  })
+
+  it("kernel.refresh 合并目录(静态优先,远程补充)", () => {
+    const kernel = createLlmKernel({ catalog: defaultCatalog() })
+    const before = kernel.models().length
+    const staticId = kernel.models()[0]!.id
+    const remote = [
+      { ...defaultCatalog()[0]!, id: "remote-new-1" },
+      { ...defaultCatalog()[0]!, id: staticId, name: "remote 覆盖版" },
+    ]
+    kernel.refresh(remote)
+    const ids = kernel.models().map((m) => m.id)
+    expect(ids).toContain("remote-new-1")
+    expect(kernel.models().length).toBe(before + 1)
+    expect(kernel.models().find((m) => m.id === staticId)!.name).not.toBe("remote 覆盖版")
+  })
+})
+
+describe("defaultCatalog", () => {
+  it("国产模型在位,thinking 能力校准", () => {
+    const catalog = defaultCatalog()
+    const byId = Object.fromEntries(catalog.map((m) => [m.id, m]))
+    expect(byId["deepseek-v4-flash-0731"]?.provider.api).toBe("deepseek")
+    expect(byId["deepseek-v4-flash-0731"]?.capabilities.supportsThinking).toBe(true)
+    expect(byId["qwen3-max"]?.provider.api).toBe("alibaba")
+    expect(byId["glm-5.2"]?.provider.api).toBe("zai")
+    expect(byId["kimi-k3"]?.provider.api).toBe("moonshot")
+    expect(byId["minimax-m3"]?.provider.api).toBe("minimax")
+    expect(byId["deepseek-v4-flash-free"]?.capabilities.supportsThinking).toBe(true)
   })
 })
 

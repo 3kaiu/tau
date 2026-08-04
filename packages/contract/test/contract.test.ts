@@ -65,6 +65,7 @@ function makeProjection(overrides?: Partial<Parameters<typeof ContextProjectionS
       cwd: "/tmp/workspace",
       permissions: [{ pattern: "bash", rule: "ask" }],
       skills: { names: ["bun"] },
+      session: { id: "s1" },
     },
     resources: {
       maxConcurrentTurns: 1,

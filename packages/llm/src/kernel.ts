@@ -5,7 +5,7 @@ import { jsonSchema, streamText, tool, type LanguageModel, type ModelMessage, ty
 import type { ContextProjection, Message, Model, ModelCapabilities, SystemCall } from "@tau/contract"
 import { resolveApiKey } from "./auth.ts"
 import { promptCache, type CachePolicy } from "./cache.ts"
-import { routeProvider } from "./route.ts"
+import { chatOptionsFor, routeProvider } from "./route.ts"
 import { collectStream, normalizeStream, type AiStreamPart, type LlmCollectResult, type LlmEvent } from "./stream.ts"
 
 export type LlmRequest = {
@@ -13,6 +13,10 @@ export type LlmRequest = {
   model?: string
   temperature?: number
   thinking?: boolean
+  /** 思考努力度(deepseek 等支持):low/medium/high/xhigh/max。 */
+  reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max"
+  /** 思考预算 token(kimi 等支持)。 */
+  thinkingBudgetTokens?: number
   maxOutputTokens?: number
   toolChoice?: "auto" | "none" | "required" | { name: string }
 }
@@ -40,7 +44,8 @@ export interface LlmKernel {
   features(model: Model): ModelCapabilities
   getAuth(model: Model): string | null
   cachePolicy(model: Model): CachePolicy
-  refresh(): void
+  /** 替换目录(动态目录接入点;不传则视为无操作)。id 冲突静态优先,远程补充新模型。 */
+  refresh(catalog?: readonly Model[]): void
 }
 
 export function createLlmKernel(options: LlmKernelOptions): LlmKernel {
@@ -108,6 +113,10 @@ export function createLlmKernel(options: LlmKernelOptions): LlmKernel {
     if (req?.temperature !== undefined) args.temperature = req.temperature
     if (req?.maxOutputTokens !== undefined) args.maxOutputTokens = req.maxOutputTokens
     if (signal) args.abortSignal = signal
+    const providerOptions = chatOptionsFor(model.provider, req ?? {})
+    if (providerOptions) {
+      args.providerOptions = providerOptions as unknown as NonNullable<Parameters<typeof streamText>[0]["providerOptions"]>
+    }
     let result: { fullStream: AsyncIterable<unknown> }
     try {
       result = await streamText(args)
@@ -139,8 +148,13 @@ export function createLlmKernel(options: LlmKernelOptions): LlmKernel {
     features: (model) => model.capabilities,
     getAuth,
     cachePolicy: (model) => promptCache(model.provider.api),
-    refresh: () => {
-      // 静态目录:动态目录接入时在此替换 catalog 并保持 API 不变
+    refresh: (next) => {
+      // 合并而非替换:id 冲突静态优先(会话当前模型不因远程缺失而失效),远程补充新模型
+      if (next && next.length > 0) {
+        const known = new Set(catalog.map((m) => m.id))
+        catalog = [...catalog, ...next.filter((m) => !known.has(m.id))]
+      }
+      lastModelId = undefined
     },
   }
 }
