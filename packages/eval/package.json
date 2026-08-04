@@ -7,5 +7,5 @@
   "types": "./src/index.ts",
   "exports": { ".": "./src/index.ts" },
   "files": ["src"],
-  "dependencies": {"@tau/contract":"workspace:*","@tau/session":"workspace:*","@tau/orchestrate":"workspace:*"}
+  "dependencies": {"@tau/contract":"workspace:*","@tau/llm":"workspace:*","@tau/store":"workspace:*","@tau/session":"workspace:*","@tau/action":"workspace:*","@tau/orchestrate":"workspace:*","@tau/surface":"workspace:*"}
 }

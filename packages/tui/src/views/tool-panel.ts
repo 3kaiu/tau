@@ -38,6 +38,7 @@ export class ToolPanelView implements Component {
   private entries: ToolEntry[] = []
   private activeCount = 0
   private cachedLines: string[] | null = null
+  private cachedWidth = -1
 
   consume(event: Event): void {
     if (event.kind !== "tool") return
@@ -86,8 +87,12 @@ export class ToolPanelView implements Component {
   }
 
   render(width: number): string[] {
-    if (this.cachedLines !== null) return this.cachedLines
-    if (this.entries.length === 0) return []
+    if (this.cachedLines !== null && this.cachedWidth === width) return this.cachedLines
+    this.cachedWidth = width
+    if (this.entries.length === 0) {
+      this.cachedLines = []
+      return this.cachedLines
+    }
 
     const lines: string[] = []
     const recent = this.entries.slice(-8)

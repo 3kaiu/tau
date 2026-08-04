@@ -140,6 +140,8 @@ packages/(依赖单向向下)
 - M1 契约 ✅(contract 包全量实现:四契约 + Goal/pendingSyscalls/Clock/usage/ErrorCode/sender + 双视角/预算/重放/配对检查器 + JSON Schema 导出 + 跨语言语义文档;单测 20 例全绿,FauxLlm 归入 M3 eval)
 - M2 最小回路 ✅(llm/store 搬迁 + session 投影 + action 3 工具 + orchestrate turn/死循环防护 + surface print + app CLI;单测 81 例全绿;出口验收 `echo "读 package.json" | tau -p` 真实模型跑通,模型调 read 工具并回传结果作答)
 - M2 经验锁定:ai@6 工具 schema 必须走 `inputSchema: jsonSchema(...)`(核心读 inputSchema 而非 parameters);stream part 工具参数字段是 `input` 而非 `args`
+- M3 评测先行 ✅(eval 包:FauxLlm 脚本化 LLM + 13 个行为断言(双视角/投影纯函数/先落盘后响应/命令纪律/副作用纪律/重放一致性/性能回归/消息配对/预算纪律/恢复告知/命令级安全/原子写/真相源)+ 套件运行器 + runs.jsonl 报告 + `tau eval` CLI;fixture harness 修正:session/action/scheduler 各源独立收集事件防递归;单测 2 例全绿,`tau eval` 13/13 passed)
+- M3 经验锁定:fixture 事件收集三源(session/action/scheduler)必须独立 push 到 events[],不能互相转发(否则 session.onEvent -> schedulerBridge -> scheduler.notify -> scheduler.onEvent -> schedulerBridge 无限递归);bash 工具依赖 Bun.spawn,vitest(node 环境)不可用,eval 套件以 `bun test` 为准
 
 ## 5. 需要你拍板的决策点
 

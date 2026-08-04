@@ -9,6 +9,7 @@ const HELP = `tau — agent 运行时
 用法:
   tau -p <prompt>        print 模式(脚本友好)
   tau -p                read prompt from stdin (echo "..." | tau -p)
+  tau eval              运行行为评测(13 个契约级断言,FauxLlm 离线)
   tau doctor            环境自检(模型/凭据)
   tau --help            显示本帮助
 
@@ -28,6 +29,9 @@ export async function runCli(argv: string[]): Promise<number> {
   const [sub] = argv
   if (sub === "doctor") {
     return doctor()
+  }
+  if (sub === "eval") {
+    return evalSuite()
   }
   if (sub !== "-p" && sub !== "--print") {
     console.error(`tau:未知参数 "${sub}"\n${HELP}`)
@@ -104,4 +108,11 @@ async function doctor(): Promise<number> {
     console.log(`提示:export OPENAI_API_KEY=... 或 TAU_<PROVIDER>_API_KEY=...`)
   }
   return ok > 0 ? 0 : 1
+}
+
+async function evalSuite(): Promise<number> {
+  const { runSuite, allAsserts, formatSummary } = await import("@tau/eval")
+  const result = await runSuite(allAsserts)
+  console.log(formatSummary(result))
+  return result.failed > 0 ? 1 : 0
 }

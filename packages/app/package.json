@@ -18,7 +18,8 @@
     "@tau/action": "workspace:*",
     "@tau/orchestrate": "workspace:*",
     "@tau/surface": "workspace:*",
-    "@tau/store": "workspace:*"
+    "@tau/store": "workspace:*",
+    "@tau/eval": "workspace:*"
   },
   "bin": {
     "tau": "./src/main.ts"

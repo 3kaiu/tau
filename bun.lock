@@ -32,6 +32,7 @@
       "dependencies": {
         "@tau/action": "workspace:*",
         "@tau/contract": "workspace:*",
+        "@tau/eval": "workspace:*",
         "@tau/llm": "workspace:*",
         "@tau/orchestrate": "workspace:*",
         "@tau/session": "workspace:*",
@@ -60,9 +61,13 @@
       "name": "@tau/eval",
       "version": "0.0.1",
       "dependencies": {
+        "@tau/action": "workspace:*",
         "@tau/contract": "workspace:*",
+        "@tau/llm": "workspace:*",
         "@tau/orchestrate": "workspace:*",
         "@tau/session": "workspace:*",
+        "@tau/store": "workspace:*",
+        "@tau/surface": "workspace:*",
       },
     },
     "packages/llm": {
