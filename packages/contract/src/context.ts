@@ -130,7 +130,29 @@ export const ImageBlockSchema = z.object({
 })
 export type ImageBlock = z.infer<typeof ImageBlockSchema>
 
-export const ContentBlockSchema = z.discriminatedUnion("type", [TextBlockSchema, ImageBlockSchema])
+/** 模型思路链:默认进历史(模型接住自己思路);可带体积上限,超限转摘要(摘要源 = enhance 策略)。 */
+export const ThinkingBlockSchema = z.object({
+  type: z.literal("thinking"),
+  text: z.string(),
+})
+export type ThinkingBlock = z.infer<typeof ThinkingBlockSchema>
+
+/** 大载荷引用:正文存 store(artifacts),历史仅引用;模型按需检索,不烧上下文。 */
+export const ArtifactBlockSchema = z.object({
+  type: z.literal("artifact"),
+  ref: z.string(),
+  mime: z.string().optional(),
+  size: z.number().int().nonnegative().optional(),
+  hash: z.string().optional(),
+})
+export type ArtifactBlock = z.infer<typeof ArtifactBlockSchema>
+
+export const ContentBlockSchema = z.discriminatedUnion("type", [
+  TextBlockSchema,
+  ImageBlockSchema,
+  ThinkingBlockSchema,
+  ArtifactBlockSchema,
+])
 export type ContentBlock = z.infer<typeof ContentBlockSchema>
 
 export const RetentionSchema = z.enum(["high", "normal", "low"])
