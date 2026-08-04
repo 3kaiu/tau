@@ -3,6 +3,7 @@
 
 import { compose } from "./compose.ts"
 import { createPrintRenderer } from "@tau/surface"
+import { CommandSchema, EventSchema } from "@tau/contract"
 
 const HELP = `tau - agent 运行时
 
@@ -12,8 +13,10 @@ const HELP = `tau - agent 运行时
   tau -p                read prompt from stdin (echo "..." | tau -p)
   tau serve [--port N]   HTTP/SSE 服务器(缺省 3000)
   tau acp                ACP 服务器(JSON-RPC over stdio,editor 驱动)
-  tau eval              运行行为评测(13 个契约级断言,FauxLlm 离线)
-  tau doctor            环境自检(模型/凭据)
+  tau eval              运行行为评测(18 个契约级断言,FauxLlm 离线)
+  tau doctor            环境自检(模型/凭据/契约 wire/store/capability 门)
+  tau log <sessionId>   导出会话事件流(JSONL,可 grep/重放;缺省 main)
+  tau replay <sessionId> 重放事件 → 投影 → 渲染转述时间线(缺省 main)
   tau --help            显示本帮助
 
 选项:
@@ -32,10 +35,16 @@ export async function runCli(argv: string[]): Promise<number> {
 
   const [sub] = argv
   if (sub === "doctor") {
-    return doctor()
+    return doctor(argv.slice(1))
   }
   if (sub === "eval") {
     return evalSuite()
+  }
+  if (sub === "log") {
+    return logMode(argv.slice(1))
+  }
+  if (sub === "replay") {
+    return replayMode(argv.slice(1))
   }
   if (sub === "serve") {
     return serveMode(argv.slice(1))
@@ -74,6 +83,25 @@ function parseCommonOpts(args: string[]): {
   if (model !== undefined) result.model = model
   if (storePath !== undefined) result.storePath = storePath
   return result
+}
+
+/** 从剩余参数中取首个位置参数作为 sessionId;跳过选项旗标及其值(--store/--workspace/--model 带值,--auto-approve/--json 为布尔)。 */
+function parseSessionId(args: string[]): string {
+  const valueFlags = new Set(["--model", "--workspace", "--store"])
+  let i = 0
+  while (i < args.length) {
+    const a = args[i]!
+    if (valueFlags.has(a)) {
+      i += 2
+      continue
+    }
+    if (a.startsWith("--")) {
+      i += 1
+      continue
+    }
+    return a
+  }
+  return "main"
 }
 
 async function printMode(rest: string[]): Promise<number> {
@@ -216,22 +244,111 @@ async function readStdin(): Promise<string> {
   return text.trim()
 }
 
-async function doctor(): Promise<number> {
-  const { defaultCatalog } = await import("@tau/llm")
-  const { resolveApiKey } = await import("@tau/llm")
+async function doctor(args: string[] = []): Promise<number> {
+  const opts = parseCommonOpts(args)
+  const { defaultCatalog, resolveApiKey } = await import("@tau/llm")
   const catalog = defaultCatalog()
-  console.log(`模型目录:${catalog.length} 个`)
-  let ok = 0
-  for (const model of catalog) {
-    const key = resolveApiKey(null, model.provider.envKey, model.provider.api === "openai" ? "OPENAI_API_KEY" : `${model.provider.api.toUpperCase()}_API_KEY`)
-    const has = key !== null
-    if (has) ok++
-    console.log(`  ${has ? "✓" : "✗"} ${model.id} (${model.provider.provider})${has ? "" : " - 缺凭据"}`)
+  const checks: { name: string; ok: boolean; detail?: string }[] = []
+
+  // 1. 模型目录 + 凭据
+  checks.push({ name: "模型目录非空", ok: catalog.length > 0, detail: `${catalog.length} 个` })
+  const hasKey = catalog.some(
+    (m) =>
+      resolveApiKey(null, m.provider.envKey, m.provider.api === "openai" ? "OPENAI_API_KEY" : `${m.provider.api.toUpperCase()}_API_KEY`) !== null,
+  )
+  checks.push({ name: "至少一模型有凭据", ok: hasKey })
+
+  // 2. 契约 wire 往返(Command / Event 可序列化还原)
+  try {
+    const cmd = CommandSchema.parse({ kind: "prompt", sender: { clientId: "doctor", kind: "cli" }, text: "ping" })
+    const evt = EventSchema.parse({ id: "e1", timestamp: "t", redact: [], kind: "input_accepted", command: cmd })
+    const roundtrip = EventSchema.parse(JSON.parse(JSON.stringify(evt)))
+    checks.push({ name: "契约 wire 往返(Command/Event)", ok: roundtrip.kind === "input_accepted" })
+  } catch (e) {
+    checks.push({ name: "契约 wire 往返(Command/Event)", ok: false, detail: String(e) })
   }
-  if (ok === 0) {
-    console.log(`提示:export OPENAI_API_KEY=... 或 TAU_<PROVIDER>_API_KEY=...`)
+
+  // 3. store 可达 + replay 可用(尊重 --store,否则 memory)
+  try {
+    const runtime = compose({
+      cwd: opts.workspace,
+      workspaceRoots: [opts.workspace],
+      skipEnhancer: true,
+      ...(opts.storePath !== undefined ? { storePath: opts.storePath } : {}),
+    })
+    const replayed = runtime.store.events.replay("doctor-probe")
+    checks.push({ name: "store 可达 + replay 可用", ok: Array.isArray(replayed), detail: opts.storePath ?? "memory" })
+    runtime.store.close?.()
+  } catch (e) {
+    checks.push({ name: "store 可达 + replay 可用", ok: false, detail: String(e) })
   }
-  return ok > 0 ? 0 : 1
+
+  // 4. capability 门生效(默认规则存在且可决策)
+  try {
+    const runtime = compose({
+      cwd: opts.workspace,
+      workspaceRoots: [opts.workspace],
+      skipEnhancer: true,
+      ...(opts.storePath !== undefined ? { storePath: opts.storePath } : {}),
+    })
+    const ruleCount = runtime.action.gate.rules.length
+    const decision = runtime.action.gate.decide("bash", true)
+    const ok = ruleCount > 0 && decision.rule !== undefined
+    checks.push({ name: "capability 门生效", ok, detail: `${ruleCount} 条规则` })
+    runtime.store.close?.()
+  } catch (e) {
+    checks.push({ name: "capability 门生效", ok: false, detail: String(e) })
+  }
+
+  let allOk = true
+  for (const c of checks) {
+    if (!c.ok) allOk = false
+    console.log(`  ${c.ok ? "✓" : "✗"} ${c.name}${c.detail ? ` (${c.detail})` : ""}`)
+  }
+  if (!hasKey) console.log(`提示:export OPENAI_API_KEY=... 或 TAU_<PROVIDER>_API_KEY=...`)
+  console.log(allOk ? "doctor: 全部通过" : "doctor: 存在失败项")
+  return allOk ? 0 : 1
+}
+
+/** `tau log <sessionId>`:从 store 重放会话事件,逐行输出 JSONL(wire 格式,机器消费)。 */
+async function logMode(args: string[]): Promise<number> {
+  const opts = parseCommonOpts(args)
+  const sessionId = parseSessionId(args)
+  const runtime = compose({
+    cwd: opts.workspace,
+    workspaceRoots: [opts.workspace],
+    skipEnhancer: true,
+    ...(opts.storePath !== undefined ? { storePath: opts.storePath } : {}),
+  })
+  const events = runtime.store.events.replay(sessionId)
+  for (const e of events) {
+    process.stdout.write(`${JSON.stringify(e)}\n`)
+  }
+  console.error(`tau log:${events.length} 条事件 (session=${sessionId})`)
+  runtime.store.close?.()
+  return 0
+}
+
+/** `tau replay <sessionId>`:重放事件 → 投影 → 渲染人类可读转述时间线(复用 surface 渲染器)。 */
+async function replayMode(args: string[]): Promise<number> {
+  const opts = parseCommonOpts(args)
+  const sessionId = parseSessionId(args)
+  const runtime = compose({
+    cwd: opts.workspace,
+    workspaceRoots: [opts.workspace],
+    skipEnhancer: true,
+    ...(opts.storePath !== undefined ? { storePath: opts.storePath } : {}),
+  })
+  const events = runtime.store.events.replay(sessionId)
+  const renderer = createPrintRenderer({ showToolCalls: true })
+  for (const e of events) {
+    renderer.consume(e)
+    const chunk = renderer.flush()
+    if (chunk !== "") console.log(chunk)
+  }
+  console.error(`tau replay:${events.length} 条事件 (session=${sessionId})`)
+  runtime.store.close?.()
+  return 0
 }
 
 async function evalSuite(): Promise<number> {
