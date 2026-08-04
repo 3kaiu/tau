@@ -134,6 +134,7 @@ packages/(依赖单向向下)
 | **M6 增强层** | skills/AGENTS.md/memory/policies 声明式装载 → 进 Context | `/skill:name` 可用 |
 | **M7 网络面** | surface HTTP/SSE + **ACP**(editor 驱动)+ 远程会话 | Zed 能连 |
 | **M8 高级特性** | Goals、Multi-run+worktree、生命周期 hooks、插件市场 | 每项有 eval |
+| **M9 产品化与可观测性**(提案) | 单二进制分发(`tau doctor`/配置)、可观测性(`tau log`/`replay`/export,本地优先)、会话治理(list/resume/archive/定时目标) | 见 docs/M9.md |
 
 **进度(已完成)**
 - M0 骨架 ✅(monorepo/CI/AGENTS.md)
@@ -152,6 +153,7 @@ packages/(依赖单向向下)
 - M7 经验锁定:Hono streamSSE 保持连接开放,单元测试需 AbortController 超时验证端点存在性而非读完整流;ACP 协议用 JSON-RPC 2.0 标准(id/method/params),editor 经 stdin 发请求 stdout 收响应 + 事件通知;serveHttp 用 Bun.serve 启动,支持 SIGINT/SIGTERM 优雅停止
 - M8 高级特性 ✅(orchestrate/goals.ts:GoalJudge 启发式判定 + 每 turn 后校验 + goal 事件;action/hooks.ts:生命周期 hooks(before/after/error 三阶段)+ createHookRegistry + 内置 auditHook/dangerousToolGate/rateLimitHook;orchestrate/multirun.ts:多模型并行 runMultiRun + selectBestRun + fuseRunResults;enhance/plugins.ts:插件市场 createPluginRegistry + createTrustedPluginRegistry + TrustLevel 信任分级;contract/event.ts 加 GoalEvent 变体;eval 加 4 个新断言(#14 Goals 判定/#15 生命周期 hooks/#16 Multi-run/#17 插件市场);单测 152 例全绿,eval 17/17 passed)
 - M8 后消费方 LLM 视角重审计(audit7.md)✅:骨架稳健(依赖方向/IO 边界/SPEC 章节全过;Event 联合 13 变体完整;投影唯一入口自字段齐全 + 注入守卫);发现并逐项修复 3 P1 + 3 P2(Command.deny 分支/Message.thinking+artifact 块/RecentActivity 统一回收压缩/ enhance 装载期只读声明/face 补 input_accepted 回执与 sender 契约意图),eval 现 18/18 passed
+- M9 方向提案(docs/M9.md,未启动):产品化与可观测性——单二进制分发(`tau doctor`/配置)、可观测性(`tau log`/`replay`/export,本地优先不外发)、会话治理(list/resume/archive/定时目标);全部建于四契约/Event 底座,零宪法冲突;候选 M10 插件市场生态 / M11 认知与长程记忆(含 thinking/artifact 渲染进 TUI) / M12 多代理编排深化
 - M8 经验锁定:Goal 判定必须在工具调用循环外部(否则纯文本回复跳过判定);hooks 测试需创建真实文件(否则 read 失败触发 error hook 而非 after);Multi-run 共享 session/action 但各模型独立 scheduler;插件信任分级(official/verified/community/untrusted)为后续市场做准备
 
 ## 5. 需要你拍板的决策点
