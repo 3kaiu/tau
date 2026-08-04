@@ -5,10 +5,12 @@
   "packageManager": "bun@1.3.14",
   "workspaces": ["packages/*"],
   "scripts": {
-    "check": "oxlint packages && tsc --noEmit -p tsconfig.json",
+    "check": "oxlint packages scripts && tsc --noEmit -p tsconfig.json",
     "test": "vitest run --passWithNoTests",
     "eval": "bun run packages/app/src/main.ts eval",
-    "dev": "bun run --cwd packages/app src/cli.ts"
+    "dev": "bun run --cwd packages/app src/cli.ts",
+    "build": "bun build --compile --minify --sourcemap packages/app/src/main.ts --outfile dist/tau",
+    "build:all": "bun run scripts/build.ts"
   },
   "devDependencies": {
     "@ai-sdk/openai-compatible": "^3.0.22",

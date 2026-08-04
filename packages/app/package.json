@@ -20,7 +20,8 @@
     "@tau/surface": "workspace:*",
     "@tau/store": "workspace:*",
     "@tau/eval": "workspace:*",
-    "@tau/enhance": "workspace:*"
+    "@tau/enhance": "workspace:*",
+    "@tau/tui": "workspace:*"
   },
   "bin": {
     "tau": "./src/main.ts"

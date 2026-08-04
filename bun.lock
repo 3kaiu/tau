@@ -39,6 +39,7 @@
         "@tau/session": "workspace:*",
         "@tau/store": "workspace:*",
         "@tau/surface": "workspace:*",
+        "@tau/tui": "workspace:*",
       },
     },
     "packages/contract": {
