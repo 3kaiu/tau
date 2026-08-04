@@ -263,6 +263,47 @@ describe("崩溃恢复", () => {
   })
 })
 
+describe("会话注册表(治理面读端)", () => {
+  it("createSession 即注册;admit/archive 刷新快照", () => {
+    const store = createStore("memory")
+    const session = createSession(makeOptions(store))
+    expect(store.sessions.get("s1")?.status).toBe("active")
+    expect(store.sessions.list().map((s) => s.sessionId)).toEqual(["s1"])
+
+    session.admit({ text: "hi", source: "cli", wake: "prompt" })
+    expect(store.sessions.get("s1")?.transcriptCount).toBe(1)
+
+    session.archive()
+    expect(store.sessions.get("s1")?.status).toBe("archived")
+    // 归档不物理删:注册表仍在,事件仍可重放
+    expect(store.sessions.list()).toHaveLength(1)
+    expect(store.events.replay("s1").length).toBeGreaterThan(0)
+  })
+
+  it("resume 把归档会话置回 active(历史不丢)", () => {
+    const store = createStore("memory")
+    const session = createSession(makeOptions(store))
+    session.admit({ text: "hi", source: "cli", wake: "prompt" })
+    session.archive()
+    session.resume()
+    expect(session.snapshot().status).toBe("active")
+    expect(store.sessions.get("s1")?.status).toBe("active")
+    expect(session.project().history).toHaveLength(1)
+
+    // 重启后从事件重放恢复 active
+    const reopened = createSession(makeOptions(store))
+    expect(reopened.snapshot().status).toBe("active")
+  })
+
+  it("createdAt 跨重启稳定(取注册表已记录值)", () => {
+    const store = createStore("memory")
+    const first = createSession(makeOptions(store, { now: () => "2026-01-01T00:00:00.000Z" }))
+    const born = first.snapshot().createdAt
+    const second = createSession(makeOptions(store, { now: () => "2026-09-09T00:00:00.000Z" }))
+    expect(second.snapshot().createdAt).toBe(born)
+  })
+})
+
 describe("多会话隔离", () => {
   it("同 store 双会话互不干扰", () => {
     const store = createStore("memory")

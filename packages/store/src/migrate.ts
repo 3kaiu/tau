@@ -5,7 +5,7 @@ import type { Database } from "bun:sqlite"
 
 export type Db = Database
 
-export const SCHEMA_VERSION = "1"
+export const SCHEMA_VERSION = "2"
 
 export function migrate(db: Db): void {
   // kv 表最先建(版本追踪依赖它)
@@ -68,8 +68,10 @@ export function migrate(db: Db): void {
     `)
   }
 
-  // 未来版本迁移:v1 -> v2 -> ... 每步检查 kv 中的 version
-  // if (row?.value === "1") { /* migrate 1 -> 2 */ }
+  // v1 -> v2:会话注册表读端(sessions.list 按 updated_at 倒序);语句幂等,新旧库同路径
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC, session_id ASC)`)
+
+  // 未来版本迁移:v2 -> v3 -> ... 每步检查 kv 中的 version
 
   db.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('schema_version', ?)").run(SCHEMA_VERSION)
 }

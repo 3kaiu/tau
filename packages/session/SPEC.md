@@ -16,6 +16,7 @@ LLM 的记忆。回答唯一问题:"LLM 现在该看到什么"。`project()` 是
 - `session.diff(fromEpoch, toEpoch)` — 投影差分(消费方增量渲染,免全量对比)
 - `session.recent()` — 最近活动块(重试/中断/模型切换/压缩告警/**recovery 告警**,进投影)——**一切自动行为进投影,无例外**
 - 崩溃恢复:重启后从 store 重放,不靠内存
+- `session.archive()` / `session.resume()` — 治理面入口:置 archived/active(发 lifecycle 事件,不删历史);注册表(store.sessions)随生命周期同步,resume 后状态与事件一致
 
 ## 宪法
 1. **投影唯一**:任何旁路拼接 Context 的行为 = 违宪(两个前端看到不同内存)
@@ -48,6 +49,9 @@ LLM 的记忆。回答唯一问题:"LLM 现在该看到什么"。`project()` 是
 - `retrieve.ts`:查询结果必须标注来源(历史/记忆/摘要),LLM 可辨别
 - `epoch.ts`:epoch 单调递增,投影带版本,消费方(UI/评测)可对比
 - 归档双轨:快照 + 增量事件,重放/断言 O(1) 起跳(大会话不 O(n) 全扫)
+- `session.ts` 注册表:`store.sessions` 是**治理面唯一读端**,写路径必须覆盖全生命周期(创建 / admit / close / archive / resume 后各 upsert 一次)——只在测试里写就是死表,`tau sessions list` 会永远为空
+- `session.ts` 恢复:重放时生命周期取**最后一条 lifecycle 事件为准**(与契约 `lastLifecycleState` 逐字对齐),不能按"见 closed 即 closed"的短路顺序判定,否则 `archive → resume → 重启` 会退回 archived
+- `session.ts` `createdAt`:优先取注册表已记录值,跨重启稳定(每次开会话都刷新 createdAt 等于抹掉会话年龄)
 
 ## 开源依赖
 `@tau/store`(持久化)。schema 用 `@tau/contract` 的类型,不再自造。

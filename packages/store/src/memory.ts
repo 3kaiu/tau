@@ -2,7 +2,7 @@
 // 与 sqlite 行为逐项对齐(差分测试兜底在 eval);单写者语义以所有权抛错表达。
 
 import type { Event, Message, SessionSnapshot } from "@tau/contract"
-import type { AuditEntry, AuditQuery, AuditTable, EventTable, KvTable, MessagePage, MessageTable, SessionTable, Store } from "./store.ts"
+import type { AuditEntry, AuditQuery, AuditTable, EventTable, KvEntry, KvTable, MessagePage, MessageTable, SessionTable, Store } from "./store.ts"
 
 class MemorySessionTable implements SessionTable {
   readonly snapshots = new Map<string, SessionSnapshot>()
@@ -11,6 +11,12 @@ class MemorySessionTable implements SessionTable {
   }
   get(sessionId: string): SessionSnapshot | null {
     return this.snapshots.get(sessionId) ?? null
+  }
+  list(limit = Number.MAX_SAFE_INTEGER): readonly SessionSnapshot[] {
+    // 与 sqlite 排序键逐项对齐:updatedAt DESC, sessionId ASC
+    return Array.from(this.snapshots.values())
+      .sort((a, b) => (a.updatedAt === b.updatedAt ? a.sessionId.localeCompare(b.sessionId) : a.updatedAt < b.updatedAt ? 1 : -1))
+      .slice(0, limit)
   }
 }
 
@@ -75,6 +81,12 @@ class MemoryKvTable implements KvTable {
   }
   delete(key: string): void {
     this.map.delete(key)
+  }
+  list(prefix = ""): readonly KvEntry[] {
+    return Array.from(this.map.entries())
+      .filter(([k]) => k.startsWith(prefix))
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([key, value]) => ({ key, value }))
   }
 }
 

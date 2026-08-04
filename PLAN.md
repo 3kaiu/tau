@@ -83,7 +83,7 @@ packages/(依赖单向向下)
 ├── session/     记忆:durable session、投影管线(唯一)、epoch、retrieve 分页
 ├── action/      手脚:syscall 注册表、执行运行时、capability 门、审计、MCP、pty
 ├── orchestrate/ 时钟:turn 调度、steer/followup、goals、子会话、cron
-├── enhance/     外设:skills/AGENTS.md/memory/policies(codemode)/plugins/摘要策略,全声明式(依赖 llm/session/action)
+├── enhance/     外设:skills/AGENTS.md/memory/policies(codemode)/plugins/摘要策略,全声明式(依赖 session/action;LLM 摘要 policy 经 app 构造期注入回调,不 import llm)
 ├── surface/     命令面:Command API、HTTP/SSE、RPC、ACP
 ├── store/       sqlite/memory 双实现
 ├── tui/         命令发布器
@@ -134,7 +134,7 @@ packages/(依赖单向向下)
 | **M6 增强层** | skills/AGENTS.md/memory/policies 声明式装载 → 进 Context | `/skill:name` 可用 |
 | **M7 网络面** | surface HTTP/SSE + **ACP**(editor 驱动)+ 远程会话 | Zed 能连 |
 | **M8 高级特性** | Goals、Multi-run+worktree、生命周期 hooks、插件市场 | 每项有 eval |
-| **M9 产品化与可观测性**(提案→骨架已立) | 单二进制分发(`tau doctor`/配置)、可观测性(`tau log`/`replay`/export,本地优先)、会话治理(list/resume/archive/定时目标) | 见 docs/M9.md |
+| **M9 产品化与可观测性** ✅ | 单二进制分发(`bun run build`/`build:all` + `tau --version`/`doctor`/`config`)、可观测性(`tau log`/`replay`/`export`,本地优先)、会话治理(`tau sessions` + `tau schedule` 定时目标) | eval 22/22 + 5 平台二进制产出 |
 
 **进度(已完成)**
 - M0 骨架 ✅(monorepo/CI/AGENTS.md)
@@ -146,14 +146,15 @@ packages/(依赖单向向下)
 - M4 持久化 ✅(store/sqlite.ts:WAL + 索引 + JSON blob + 预处理语句;migrate.ts:版本化幂等迁移;createStore("sqlite", path) 可用;compose/cli 支持 --store <path>;断点续跑测试 4 场景全绿:崩溃恢复消息+epoch+recovery 告警/正常 close 不告警/多会话隔离/usage 跨重启;audit 归档(audit_archive 表,不删历史);单测 126 例全绿,eval 13/13 passed)
 - M4 经验锁定:bun:sqlite AUTOINCREMENT 列不能手动赋值(传 NULL 让 SQLite 自增);SQLite named parameter(@name)在 Bun 中绑定不稳定,改用位置参数 + excluded;vitest(node)无法 import bun:sqlite,SQLite 测试以 `bun test` 为准;store.ts 接口加 `close?` 可选方法(memory 无操作)
 - M5 TUI ✅(face.ts 全 Command 分发:prompt/steer/abort/approve/answer/select/observe;action/runtime.ts 加 onPermission 回调 + setPermissionHandler(运行期注入);cli.ts 三模式路由:tau(交互)/tau -p(print)/tau eval;TUI askPermission 弹窗 -> Promise<boolean> -> action 继续/拒绝;Ctrl+C 打断;权限弹窗批准/拒绝;21 原有 TUI 单测全绿,126 总测试全绿,eval 13/13 passed)
-- M5 经验锁定:onPermission 回调优于事件驱动权限流(避免 suspend/resume 复杂性);action 发 permission 事件只发 granted/denied 不发 requested(弹窗由回调直接驱动,事件仅供观察);exactOptionalPropertyTypes 下条件赋值需用中间变量带完整类型;CLI 路由:sub===undefined||sub.startsWith("--") -> TUI 模式
+- M5 经验锁定:onPermission 回调优于事件驱动权限流(避免 suspend/resume 复杂性);action 发 permission 事件只发 granted/denied 不发 requested(弹窗由回调直接驱动,事件仅供观察);exactOptionalPropertyTypes 下条件赋值需用中间变量带完整类型;CLI 路由:sub===undefined||sub.startsWith("--") -> TUI 模式。**(audit8 修订:本条"不发 requested"作废——远程 approve 需 requested 事件闭环,已改为"回调 + requested 事件双轨",契约/action/surface SPEC 已同步)**
 - M6 增强层 ✅(enhance 包:frontmatter.ts(YAML 解析)+ skills.ts(目录扫描+两级装载)+ memory.ts(remember/recall/forget via store.kv)+ summarize.ts(规则摘要)+ enhancer.ts(聚合);compose.ts 接入 enhancer -> extraSystemBlocks(AGENTS.md constitution 块 + skill catalog context 块)+ self.skills.names;skill:load syscall(T0 allow,按名取全文);TUI /skill:name -> prompt 展开为"请用 skill:load 加载技能";单测 145 例全绿,eval 13/13 passed)
 - M6 经验锁定:/skill:name 不需新 Command 变体(TUI 层展开为 prompt,LLM 经 skill:load syscall 取全文);enhancer.apply() 产出 SystemBlock[] + skillNames,compose 注入 session extraSystemBlocks + skills;AGENTS.md 作 constitution 块注入(skill catalog 作 context 块);memory 用 store.kv 前缀隔离(sessionId:key)
 - M7 网络面 ✅(surface 包:http.ts(Hono HTTP/SSE 服务器 + Last-Event-ID 重放 + 心跳保活)+ acp.ts(JSON-RPC over stdio,editor 驱动)+ serveHttp/runAcpServer 入口;app CLI 加 tau serve [--port N] + tau acp 命令;hono 依赖加入 surface;单测 152 例全绿,eval 13/13 passed)
 - M7 经验锁定:Hono streamSSE 保持连接开放,单元测试需 AbortController 超时验证端点存在性而非读完整流;ACP 协议用 JSON-RPC 2.0 标准(id/method/params),editor 经 stdin 发请求 stdout 收响应 + 事件通知;serveHttp 用 Bun.serve 启动,支持 SIGINT/SIGTERM 优雅停止
 - M8 高级特性 ✅(orchestrate/goals.ts:GoalJudge 启发式判定 + 每 turn 后校验 + goal 事件;action/hooks.ts:生命周期 hooks(before/after/error 三阶段)+ createHookRegistry + 内置 auditHook/dangerousToolGate/rateLimitHook;orchestrate/multirun.ts:多模型并行 runMultiRun + selectBestRun + fuseRunResults;enhance/plugins.ts:插件市场 createPluginRegistry + createTrustedPluginRegistry + TrustLevel 信任分级;contract/event.ts 加 GoalEvent 变体;eval 加 4 个新断言(#14 Goals 判定/#15 生命周期 hooks/#16 Multi-run/#17 插件市场);单测 152 例全绿,eval 17/17 passed)
 - M8 后消费方 LLM 视角重审计(audit7.md)✅:骨架稳健(依赖方向/IO 边界/SPEC 章节全过;Event 联合 13 变体完整;投影唯一入口自字段齐全 + 注入守卫);发现并逐项修复 3 P1 + 3 P2(Command.deny 分支/Message.thinking+artifact 块/RecentActivity 统一回收压缩/ enhance 装载期只读声明/face 补 input_accepted 回执与 sender 契约意图),eval 现 18/18 passed
-- M9 方向提案(docs/M9.md)+ 骨架已立:`tau doctor` 4 项自检(模型目录/凭据/契约 wire 往返/store 可达+replay/capability 门生效)、`tau log`(事件流 JSONL)、`tau replay`(重放→投影转述)、`tau export`(JSONL/Markdown 本地落盘,含 thinking/artifact 渲染,不外发)——**支柱 B 可观测性已完成**;出口断言草案 #19-#22 待补;会话治理(list/resume/archive 需先为 store 加 listSessions)/单二进制分发待做;候选 M10 插件市场生态 / M11 认知与长程记忆 / M12 多代理编排深化
+- M9 方向提案(docs/M9.md)+ 实施中:`tau doctor` 4 项自检(模型目录/凭据/契约 wire 往返/store 可达+replay/capability 门生效)、`tau log`(事件流 JSONL)、`tau replay`(重放→投影转述)、`tau export`(JSONL/Markdown 本地落盘,含 thinking/artifact 渲染,不外发)——**支柱 B 可观测性 ✅(实现 + 出口断言 #19/#20 落地,eval 22/22 passed)**;**支柱 C 会话治理 ✅(store 加 sessions.list/kv.list + 迁移 v2 + session resume/archive 注册表同步;`tau sessions list/show/resume/archive/delete`;定时目标 orchestrate/cron.ts + `tau schedule list`;出口断言 #21/#22 落地)**;**支柱 A 分发 ✅(`tau --version`;`tau config list/get/set/unset` 落 store.kv、key 命中 secret 模式即拒明文落盘;doctor 5 项自检;`bun run build` → `dist/tau`,`bun run build:all` 交叉编译 darwin/linux x64+arm64 与 windows-x64 共 5 个产物,`tau --version` 实测 38ms 启动,二进制内 `tau eval` 22/22)**;M9 三支柱全部验收。候选 M10 插件市场生态 / M11 认知与长程记忆 / M12 多代理编排深化
+- M9 经验锁定:**`@tau/tui` 曾漏在 app 依赖之外**——动态 `import()` 在 dev 态被 bun 的根目录解析兜住,直到 `bun build --compile` 才暴露;交互模式(最主要入口)其实一直起不来,懒加载的模块也必须是声明依赖。观测命令(log/replay/export)严禁 `compose()`,否则"看一眼"就往被观测会话写 recovery 事件;`store.sessions` 注册表若只有测试在写就是死表,写路径必须铺满 session 生命周期;`recover()` 的生命周期还原必须"最后一条 lifecycle 为准",短路顺序判定会让 `archive → resume → 重启` 退回 archived;`sch-${Date.now()}` 这类 id 同毫秒连发会撞,撞了要补序号而非静默覆盖;cron 自实现(五段最小子集 ~120 行)优于引 `croner`——tau 只要分钟粒度本地时区
 - M8 经验锁定:Goal 判定必须在工具调用循环外部(否则纯文本回复跳过判定);hooks 测试需创建真实文件(否则 read 失败触发 error hook 而非 after);Multi-run 共享 session/action 但各模型独立 scheduler;插件信任分级(official/verified/community/untrusted)为后续市场做准备
 
 ## 5. 需要你拍板的决策点

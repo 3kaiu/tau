@@ -6,4 +6,18 @@ export { GoalJudge, judgeGoalHeuristic } from "./goals.ts"
 export type { GoalJudgeResult, GoalJudgeOptions } from "./goals.ts"
 export { runMultiRun, selectBestRun, fuseRunResults } from "./multirun.ts"
 export type { MultiRunConfig, MultiRunResult, RunResult, MultiRunDeps } from "./multirun.ts"
+export {
+  parseCron,
+  cronMatches,
+  nextAfter,
+  isDue,
+  dueEntries,
+  loadSchedules,
+  saveSchedules,
+  upsertSchedule,
+  removeSchedule,
+  markRan,
+  SCHEDULES_KEY,
+} from "./cron.ts"
+export type { CronSpec, ScheduleEntry } from "./cron.ts"
 export const version = "0.0.1"

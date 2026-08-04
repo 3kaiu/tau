@@ -3,7 +3,7 @@
 
 import { Database, type Statement } from "bun:sqlite"
 import type { Event, Message, SessionSnapshot } from "@tau/contract"
-import type { AuditEntry, AuditQuery, AuditTable, EventTable, KvTable, MessagePage, MessageTable, SessionTable, Store } from "./store.ts"
+import type { AuditEntry, AuditQuery, AuditTable, EventTable, KvEntry, KvTable, MessagePage, MessageTable, SessionTable, Store } from "./store.ts"
 import { migrate, type Db } from "./migrate.ts"
 
 // ---------- SessionTable ----------
@@ -11,6 +11,7 @@ import { migrate, type Db } from "./migrate.ts"
 class SqliteSessionTable implements SessionTable {
   private readonly upsertStmt: Statement
   private readonly getStmt: Statement
+  private readonly listStmt: Statement
 
   constructor(db: Db) {
     this.upsertStmt = db.prepare(
@@ -21,6 +22,9 @@ class SqliteSessionTable implements SessionTable {
          payload = excluded.payload, updated_at = excluded.updated_at`,
     )
     this.getStmt = db.prepare("SELECT payload FROM sessions WHERE session_id = ?")
+    this.listStmt = db.prepare(
+      "SELECT payload FROM sessions ORDER BY updated_at DESC, session_id ASC LIMIT ?",
+    )
   }
 
   upsert(snapshot: SessionSnapshot): void {
@@ -34,6 +38,11 @@ class SqliteSessionTable implements SessionTable {
     const row = this.getStmt.get(sessionId) as { payload: string } | null
     if (row === null) return null
     return JSON.parse(row.payload) as SessionSnapshot
+  }
+
+  list(limit = Number.MAX_SAFE_INTEGER): readonly SessionSnapshot[] {
+    const rows = this.listStmt.all(limit) as { payload: string }[]
+    return rows.map((r) => JSON.parse(r.payload) as SessionSnapshot)
   }
 }
 
@@ -153,11 +162,14 @@ class SqliteKvTable implements KvTable {
   private readonly getStmt: Statement
   private readonly setStmt: Statement
   private readonly deleteStmt: Statement
+  private readonly listStmt: Statement
 
   constructor(db: Db) {
     this.getStmt = db.prepare("SELECT value FROM kv WHERE key = ?")
     this.setStmt = db.prepare("INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?")
     this.deleteStmt = db.prepare("DELETE FROM kv WHERE key = ?")
+    // substr 前缀匹配而非 LIKE:免去 %/_ 转义,语义与 memory 驱动逐字一致
+    this.listStmt = db.prepare("SELECT key, value FROM kv WHERE substr(key, 1, ?) = ? ORDER BY key ASC")
   }
 
   get(key: string): string | null {
@@ -171,6 +183,10 @@ class SqliteKvTable implements KvTable {
 
   delete(key: string): void {
     this.deleteStmt.run(key)
+  }
+
+  list(prefix = ""): readonly KvEntry[] {
+    return this.listStmt.all(prefix.length, prefix) as KvEntry[]
   }
 }
 

@@ -21,6 +21,13 @@
   11. **命令级安全**:危险模式命令强制询问(不静默执行)——配合断言 5
   12. **原子写**(行为断言,豁免宪法 3——测 action 文件系统行为而非契约不变量):write 中途失败不产生损坏文件
   13. **真相源**:进程类工具结果必带 exitCode,stderr 独立
+- 追加断言(M8 高级特性 + audit7,audit8 补记):
+  14. **Goals 判定**:goal 设定后每 turn 校验,完成发 `goal(completed)` 事件;未完成但预算耗尽 → `budget_exceeded` 而非继续(goal 循环不豁免预算)
+  15. **生命周期 hooks**:before/after/error 三阶段按序触发,error hook 收到失败信息
+  16. **Multi-run**:一任务 N 模型并行,可 selectBest/fuse,fusion 产出可继续会话(工作区 = 主工作区)
+  17. **插件市场**:注册/信任分级/降权运行(TrustLevel 生效)
+  18. **命令纪律补强**:deny 分支闭环 + `input_accepted` 回执(命令先回执后执行)
+- **M9 出口断言**(#19-#22,见 docs/M9.md):#19 事件导出 JSONL → 重放与快照一致 / #20 doctor 自检覆盖关键不变量 / #21 归档后重放恢复 + recovery 告知 / #22 定时目标到点触发 goal 判定。**已全部落地,eval 22/22 passed(M9 支柱 B/C 出口标准满足)。**
 - `eval.inspect(session)` — 重放会话导出分析
 - 输出:`runs.jsonl`(标准化,跨版本可对比)
 

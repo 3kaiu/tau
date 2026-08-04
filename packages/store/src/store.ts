@@ -30,6 +30,8 @@ export type AuditQuery = {
 export interface SessionTable {
   upsert(snapshot: SessionSnapshot): void
   get(sessionId: string): SessionSnapshot | null
+  /** 会话注册表:按 updatedAt 倒序列出(治理面读端;两驱动行为逐项对齐)。 */
+  list(limit?: number): readonly SessionSnapshot[]
 }
 
 export interface MessageTable {
@@ -50,10 +52,14 @@ export interface AuditTable {
   query(query: AuditQuery): readonly AuditEntry[]
 }
 
+export type KvEntry = { key: string; value: string }
+
 export interface KvTable {
   get(key: string): string | null
   set(key: string, value: string): void
   delete(key: string): void
+  /** 按前缀枚举(key 升序)。配置面读端;前缀为空即全表。 */
+  list(prefix?: string): readonly KvEntry[]
 }
 
 export interface Store {

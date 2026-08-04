@@ -6,7 +6,7 @@ import { SqliteStore } from "./sqlite.ts"
 
 export const version = "0.0.1"
 
-export type { Store, StoreMessage, StoreEvent, MessagePage, AuditEntry, AuditQuery, SessionTable, MessageTable, EventTable, AuditTable, KvTable } from "./store.ts"
+export type { Store, StoreMessage, StoreEvent, MessagePage, AuditEntry, AuditQuery, SessionTable, MessageTable, EventTable, AuditTable, KvTable, KvEntry } from "./store.ts"
 export { MemoryStore } from "./memory.ts"
 export { SqliteStore } from "./sqlite.ts"
 export { migrate, SCHEMA_VERSION } from "./migrate.ts"

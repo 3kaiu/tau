@@ -3,6 +3,7 @@
 // 每个断言独立创建 fixture,无共享状态;失败抛 Error,runner 捕获汇总。
 
 import { assertDualView, assertReplay, assertToolPairing, checkBudget, type UiView } from "@tau/contract"
+import type { ScheduleEntry } from "@tau/orchestrate"
 import type { Assert } from "./eval.ts"
 import { createFixture, runTurn } from "./fixtures.ts"
 import { textReply, toolReply } from "./faux.ts"
@@ -498,8 +499,164 @@ const assert18: Assert = {
   },
 }
 
+// ---------- 19. 导出与投影同源 ----------
+
+const assert19: Assert = {
+  id: 19,
+  name: "导出与投影同源",
+  description: "tau export/log/replay 的两条数据源(events / messages)wire 可往返,且与 project().history 逐条同源",
+  async run() {
+    const { CommandSchema, EventSchema } = await import("@tau/contract")
+    void CommandSchema
+    const f = createFixture({
+      script: { replies: [toolReply([{ id: "c1", name: "read", args: { path: "pkg.json" } }]), textReply("导出验证")] },
+    })
+    await runTurn(f, "读 pkg.json")
+    const sid = f.session.sessionId
+
+    // JSONL 导出面:每条事件序列化后必须能原样解回(否则 tau log 的产物不可重放)
+    const events = f.store.events.replay(sid)
+    if (events.length === 0) throw new Error("事件流为空,无可导出")
+    for (const e of events) {
+      const back = EventSchema.parse(JSON.parse(JSON.stringify(e)))
+      if (back.kind !== e.kind || back.id !== e.id) throw new Error(`事件 wire 往返丢信息: ${e.kind}`)
+    }
+    if (f.store.events.count(sid) !== events.length) throw new Error("events.count 与 replay 长度不一致")
+
+    // Markdown 导出面:store.messages 即投影 history 的来源,不得有第二条真相
+    const stored = f.store.messages.list(sid).messages
+    const history = f.session.project().history
+    if (stored.length !== history.length) throw new Error(`导出消息数 ${stored.length} ≠ 投影 history ${history.length}`)
+    for (let i = 0; i < stored.length; i++) {
+      if (stored[i]!.id !== history[i]!.id) throw new Error(`导出与投影第 ${i} 条不同源`)
+    }
+    assertReplay(events, f.session.project(), f.session.snapshot())
+    f.cleanup()
+  },
+}
+
+// ---------- 20. doctor 自检项成立 ----------
+
+const assert20: Assert = {
+  id: 20,
+  name: "doctor 自检项成立",
+  description: "契约 wire 往返 / store 迁移幂等 + kv 前缀枚举 / capability 门可决策 —— doctor 的三项断言在契约级成立",
+  async run() {
+    const { CommandSchema, EventSchema } = await import("@tau/contract")
+    const f = createFixture({ script: { replies: [textReply("ok")] } })
+
+    // 1) 契约 wire 往返
+    const cmd = CommandSchema.parse({ kind: "prompt", sender: { clientId: "doctor", kind: "cli" }, text: "ping" })
+    const evt = EventSchema.parse({ id: "e1", timestamp: "t", redact: [], kind: "input_accepted", command: cmd })
+    const roundtrip = EventSchema.parse(JSON.parse(JSON.stringify(evt)))
+    if (roundtrip.kind !== "input_accepted") throw new Error("Command/Event wire 往返失败")
+
+    // 2) store 迁移幂等 + kv 前缀枚举(config 命令的读端)
+    f.store.migrate()
+    f.store.migrate()
+    f.store.kv.set("config:model", "faux-1")
+    f.store.kv.set("config:ui.theme", "dark")
+    f.store.kv.set("other:x", "1")
+    const conf = f.store.kv.list("config:")
+    if (conf.length !== 2) throw new Error(`kv 前缀枚举应得 2 条,实际 ${conf.length}`)
+    if (conf.some((e) => !e.key.startsWith("config:"))) throw new Error("kv 前缀枚举漏进无关键")
+    if (f.store.events.replay("doctor-probe").length !== 0) throw new Error("未知会话 replay 应为空而非报错")
+
+    // 3) capability 门有规则且可决策
+    if (f.action.gate.rules.length === 0) throw new Error("capability 门无规则")
+    const decision = f.action.gate.decide("bash", true)
+    if (decision.rule === undefined) throw new Error("capability 门对 bash 无决策")
+    f.cleanup()
+  },
+}
+
+// ---------- 21. 归档不是删除 ----------
+
+const assert21: Assert = {
+  id: 21,
+  name: "归档不是删除",
+  description: "archive 只标记状态:重启后仍可重放全部历史,resume 置回 active 且转述不丢",
+  async run() {
+    const f = createFixture({ script: { replies: [textReply("归档前的回答")] } })
+    await runTurn(f, "归档前的提问")
+    const sid = f.session.sessionId
+    const store = f.store
+    const beforeEvents = store.events.replay(sid).length
+    const beforeMessages = store.messages.count(sid)
+    if (beforeMessages === 0) throw new Error("归档前无消息,场景无效")
+
+    f.session.archive()
+    if (f.session.snapshot().status !== "archived") throw new Error("archive 后状态非 archived")
+    if (store.messages.count(sid) !== beforeMessages) throw new Error("archive 物理删了消息(违反'归档不是删除')")
+    if (store.sessions.get(sid)?.status !== "archived") throw new Error("注册表未反映 archived")
+
+    // 重启:同 store 新建 session,从事件重放恢复
+    const f2 = createFixture({ script: { replies: [textReply("恢复后的回答")] }, store, sessionId: sid })
+    if (f2.session.snapshot().status !== "archived") throw new Error("重启后未恢复为 archived")
+    if (f2.session.project().history.length === 0) throw new Error("重启后历史丢失")
+    if (store.events.replay(sid).length < beforeEvents) throw new Error("重启后事件流变短(历史被截断)")
+
+    f2.session.resume()
+    if (f2.session.snapshot().status !== "active") throw new Error("resume 后状态非 active")
+    if (store.sessions.get(sid)?.status !== "active") throw new Error("resume 未刷新注册表")
+    if (store.messages.count(sid) !== beforeMessages) throw new Error("resume 后消息数变化")
+
+    // 再重启一次:resume 的结论必须落在事件流里(最后一条 lifecycle 为准)
+    const f3 = createFixture({ script: { replies: [textReply("x")] }, store, sessionId: sid })
+    if (f3.session.snapshot().status !== "active") throw new Error("resume 后再重启退回了 archived")
+    f3.cleanup()
+  },
+}
+
+// ---------- 22. 定时目标到点触发 ----------
+
+const assert22: Assert = {
+  id: 22,
+  name: "定时目标到点触发",
+  description: "cron 到点 → 目标经 session.setGoal 进投影(不旁路拼 Context)→ markRan 后同一命中不重复触发",
+  async run() {
+    const { dueEntries, isDue, loadSchedules, markRan, parseCron, upsertSchedule } = await import("@tau/orchestrate")
+    const { goal } = await import("@tau/contract")
+    if (parseCron("*/5 * * * *") === null) throw new Error("合法 cron 被判非法")
+    if (parseCron("每天早上") !== null) throw new Error("非法 cron 未被拒绝")
+
+    const f = createFixture({ script: { replies: [textReply("定时任务已执行")] } })
+    const now = new Date()
+    const entry: ScheduleEntry = {
+      id: "sch-eval",
+      cron: "* * * * *",
+      sessionId: f.session.sessionId,
+      goalText: "每分钟汇总收件箱",
+      createdAt: new Date(now.getTime() - 10 * 60_000).toISOString(),
+      lastRunAt: null,
+    }
+    upsertSchedule(f.store, entry)
+    const due = dueEntries(loadSchedules(f.store), now)
+    if (due.length !== 1 || due[0]!.id !== "sch-eval") throw new Error("过去创建的每分钟调度未判为到点")
+
+    // 触发路径:目标进 session(投影可见),再以 prompt 唤醒 —— 模型输入唯一路径
+    f.scheduler.goals.set(goal(entry.id, entry.goalText))
+    const projection = f.session.project()
+    if (!projection.activeGoals.some((g) => g.id === entry.id)) throw new Error("定时目标未进投影 activeGoals")
+    if (!JSON.stringify(projection.system).includes(entry.goalText)) throw new Error("定时目标文本未进 system 块(模型看不到)")
+
+    const result = await f.face.publish({ kind: "prompt", sender: { clientId: "cron", kind: "cli" }, text: entry.goalText })
+    if (!result.accepted) throw new Error(`定时唤醒未被接受: ${result.detail}`)
+    await f.scheduler.waitForIdle()
+
+    // 幂等锚点:markRan 后同一命中不得重复触发
+    markRan(f.store, entry.id, now.toISOString())
+    const after = loadSchedules(f.store)[0]!
+    if (after.lastRunAt !== now.toISOString()) throw new Error("markRan 未落 lastRunAt")
+    if (isDue(after, now)) throw new Error("markRan 后同一时刻仍判到点(会重复触发)")
+    if (dueEntries(loadSchedules(f.store), now).length !== 0) throw new Error("markRan 后仍有到点条目")
+    f.cleanup()
+  },
+}
+
 export const allAsserts: readonly Assert[] = [
   assert1, assert2, assert3, assert4, assert5, assert6,
   assert7, assert8, assert9, assert10, assert11, assert12, assert13,
   assert14, assert15, assert16, assert17, assert18,
+  assert19, assert20, assert21, assert22,
 ]

@@ -102,6 +102,8 @@ export interface Session {
   recent(): ReturnType<typeof recentActivityFrom>
   close(): void
   archive(): void
+  /** 归档/关闭的会话置回 active(治理面 resume;历史不删,只改状态)。 */
+  resume(): void
 }
 
 const uuid = () => crypto.randomUUID()
@@ -110,7 +112,8 @@ export function createSession(options: SessionOptions): Session {
   const { store, sessionId } = options
   const projectionOptions = normalizeProjectorOptions(sessionId, options)
   const epoch = Epoch.load(store.kv, sessionId)
-  const createdAt = options.now?.() ?? new Date().toISOString()
+  // 出生时间取注册表已记录值:跨重启稳定,不因重新 createSession 而重置
+  const createdAt = store.sessions.get(sessionId)?.createdAt ?? options.now?.() ?? new Date().toISOString()
   const monotonicBase = options.monotonic?.() ?? 0
 
   let status: "active" | "archived" | "closed" = "active"
@@ -136,6 +139,11 @@ export function createSession(options: SessionOptions): Session {
     cachedProjection = null
   }
 
+  /** 会话注册表写路径:快照落 store.sessions。治理面(tau sessions)的唯一读端来源。 */
+  function register(): void {
+    store.sessions.upsert(api.snapshot())
+  }
+
   function recordEpochState(): void {
     const all = store.messages.list(sessionId)
     epochHistory.set(epoch.current, { ids: all.messages.map((m) => m.id), usage: { ...usage } })
@@ -152,9 +160,10 @@ export function createSession(options: SessionOptions): Session {
   function recover(): void {
     const events = store.events.replay(sessionId)
     for (const e of events) {
-      if (e.kind === "lifecycle" && e.state === "closed") status = "closed"
-      if (e.kind === "lifecycle" && e.state === "archived") status = "archived"
-      if (e.kind === "lifecycle" && e.state === "active" && status === "active") status = "active"
+      // 最后一条 lifecycle 为准,映射与契约 checkReplay/checkDualView 逐字对齐(否则重启后快照与事件互相打架)
+      if (e.kind === "lifecycle") {
+        status = e.state === "closed" ? "closed" : e.state === "archived" ? "archived" : "active"
+      }
     }
     const hasWork = store.messages.count(sessionId) > 0
     if (hasWork && status === "active") {
@@ -217,6 +226,7 @@ export function createSession(options: SessionOptions): Session {
       lastWake = { reason: input.wake, source: input.source }
       touch()
       recordEpochState()
+      register()
       return message
     },
 
@@ -417,14 +427,25 @@ export function createSession(options: SessionOptions): Session {
       status = "closed"
       emit({ id: uuid(), timestamp: clock().wall, redact: [], kind: "lifecycle", sessionId, state: "closed" })
       touch()
+      register()
     },
 
     archive(): void {
       status = "archived"
       emit({ id: uuid(), timestamp: clock().wall, redact: [], kind: "lifecycle", sessionId, state: "archived" })
       touch()
+      register()
+    },
+
+    resume(): void {
+      status = "active"
+      emit({ id: uuid(), timestamp: clock().wall, redact: [], kind: "lifecycle", sessionId, state: "active" })
+      touch()
+      register()
     },
   }
+
+  register()
 
   return api
 }

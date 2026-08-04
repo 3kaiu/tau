@@ -12,7 +12,7 @@
 - **Session Goals**:`scheduler.goals.set(goal)` — 每 turn 后判定,未完成继续,超限停止;**判定结果经 `session.setGoal()` 写入投影**(编排不拼 Context,依赖单向向下)
 - **子会话**:`fork(manifest)` → 子 session 句柄(降级 capability,durable,可 join/abort)
 - **Multi-run**:`multiRun(manifest)` — 一任务 N 模型并行 spawn 子会话(各带独立 worktree,经 action 创建,隔离于主工作区);`fusion(runs)` — 汇总各子会话 diff 生成新会话(Fusion 语义:diff 并集 + 冲突标注,产出物为可继续对话的新会话)
-- **定时唤醒**:`schedule(cron, prompt)` — 定时执行 + Goals 驱动
+- **定时唤醒**:纯判定 `parseCron` / `cronMatches` / `nextAfter` / `isDue` / `dueEntries`(五段 cron 最小子集 + `@hourly`/`@daily`/`@weekly`/`@monthly`/`@yearly` 别名,分钟粒度,本地时区);调度表持久化 `loadSchedules` / `saveSchedules` / `upsertSchedule` / `removeSchedule` / `markRan`(落 `store.kv`,不新建表)。到点后由调用方(app CLI)`goals.set(goal)` + 唤醒——**编排给判定与调度表,不起常驻守护进程**(由系统 cron 驱动 `tau schedule run`)
 - 崩溃恢复:重放 store 决定续跑点
 - **wake 产出**:每次唤醒(steer/answer/goal 续跑/cron/retry/resume)附 `wake.reason + source`,模型永远知道"为什么现在醒"
 - **重试可见**:重试发 `retry` 事件(次数/原因)进投影最近活动——自动行为不隐藏
@@ -35,7 +35,7 @@
 | `src/goals.ts` | Goal 判定(每 turn 后:完成/继续/阻塞/超限) |
 | `src/subagent.ts` | 子会话生命周期(fork/join/abort/观察) |
 | `src/multirun.ts` | Multi-run 编排(spawn N 子会话 + worktree)与 Fusion 汇总 |
-| `src/cron.ts` | 定时唤醒(调度表 + 持久化) |
+| `src/cron.ts` | 定时唤醒(cron 判定 + 调度表持久化) |
 | `src/lifecycle.ts` | abort/retry/故障转移/恢复 |
 
 ## 模块宪法要点
@@ -46,15 +46,17 @@
 - `multirun.ts`:manifest 声明模型集/工作区/预算,各 run 独立 durable、独立审计;fusion 汇总经 session 输入通道(依赖单向向下),冲突标注后交模型裁决;worktree 由 action 创建与清理,失败清理不残留;**fusion 产出的新会话 manifest 继承主 run 的模型/能力,工作区 = 主工作区(非任一子 run 的 worktree)**
 - `lifecycle.ts`:同"失败指纹"扩展为**行为指纹**(同工具同参数无论成败 N 次)→ `loop_detected` + 投影告警;steer 中断粒度:缺省"当前工具执行完 + 本 turn 结束",可配"立即断流"(已完成的工具结果提交,未完成部分带 interrupted);重试带 `retry` 事件;crash 恢复发 `recovery` 事件 + **副作用悬置判定**(从审计日志判定上次 turn 已提交/未提交的 syscall 清单,告警带清单,模型据此检查文件而非瞎猜)
 - `cron.ts`/`queues.ts`:唤醒时产出 `wake.reason`(cron/steer/goal_continue/answer);steer 进历史带 `user_steer` 标记(模型区分"新指令"与"打断插话")
+- `cron.ts`:判定全为纯函数(离线可断言);**`lastRunAt` 是幂等锚点**——`isDue` 从"上次运行(或创建)之后的下一个命中"起算,同一命中不会因重复调用 `run` 而重复触发;`dom` 与 `dow` 同时受限时取"或"(标准 cron 语义);非法表达式返回 `null` 交调用方给可操作报错,不静默当成"永不触发"
 
 ## 开源依赖
-零新增(契约+llm+session+action 组合)。cron 表达式解析用轻量库(`croner`,后期)。
+零新增(契约+llm+session+action+store 组合)。**cron 表达式自实现**(`src/cron.ts`,五段最小子集 ~120 行):`croner` 等库带完整时区/秒级/L-W 语法,而 tau 只需分钟粒度本地时区——引依赖的成本高于收益,且违背"不引入新依赖"。
 
 ## 性能与算法
 - turn 状态机单线程无锁,事件队列摊销 O(1);不引入全局锁
 - goal 判定默认常量级启发式(不调 LLM);可选 judge 模型走异步降级,不阻塞主 turn
 - 子会话并发上限(limiter),防子代理风暴
 - 恢复:从 store 重放,不依赖内存热态(避免 O(n) 重建)
+- cron `nextAfter` 逐日/逐时跳跃而非逐分扫描:最坏 366+24+60 步,不做全年分钟遍历;366 天无命中即返回 `null`(防 `0 0 30 2 *` 这类永不命中的表达式死循环)
 
 ## 多语言
 - 调度语义(提交点/promote 规则/队列优先级/中断处理)写成 `docs/scheduler.md` 规范
