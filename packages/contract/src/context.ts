@@ -213,7 +213,7 @@ export type Resources = z.infer<typeof ResourcesSchema>
 // ---------- 最近活动块 ----------
 
 export const RecentActivitySchema = z.object({
-  kind: z.enum(["retry", "interrupted", "model_switched"]),
+  kind: z.enum(["retry", "interrupted", "model_switched", "recovery", "compression"]),
   text: z.string(),
   eventId: z.string(),
 })

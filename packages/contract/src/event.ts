@@ -133,7 +133,7 @@ export const EventSchema = z.discriminatedUnion("kind", [
 export type Event = z.infer<typeof EventSchema>
 
 /** 需进投影"最近活动块"的事件种类(模型必须看到自己刚被打断/重试/换模型)。 */
-export const RECENT_ACTIVITY_KINDS = ["retry", "interrupted", "model_switched"] as const
+export const RECENT_ACTIVITY_KINDS = ["retry", "interrupted", "model_switched", "recovery", "compression"] as const
 export type RecentActivityKind = (typeof RECENT_ACTIVITY_KINDS)[number]
 
 /** 从事件推导最近活动(纯函数,供 session 组装投影)。无相关事件返回 null。 */
@@ -151,6 +151,12 @@ export function recentActivityFrom(
     }
     if (e.kind === "model_switched") {
       return { kind: "model_switched", text: `${e.from} -> ${e.to}: ${e.reason}`, eventId: e.id }
+    }
+    if (e.kind === "recovery") {
+      return { kind: "recovery", text: `recovery: ${e.detail ?? e.from}`, eventId: e.id }
+    }
+    if (e.kind === "compression") {
+      return { kind: "compression", text: `compressed ${e.droppedIds.length} msgs`, eventId: e.id }
     }
   }
   return null
