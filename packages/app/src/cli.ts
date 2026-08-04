@@ -3,7 +3,7 @@
 
 import { compose } from "./compose.ts"
 import { createPrintRenderer } from "@tau/surface"
-import { CommandSchema, EventSchema } from "@tau/contract"
+import { CommandSchema, EventSchema, type Message } from "@tau/contract"
 
 const HELP = `tau - agent 运行时
 
@@ -17,6 +17,7 @@ const HELP = `tau - agent 运行时
   tau doctor            环境自检(模型/凭据/契约 wire/store/capability 门)
   tau log <sessionId>   导出会话事件流(JSONL,可 grep/重放;缺省 main)
   tau replay <sessionId> 重放事件 → 投影 → 渲染转述时间线(缺省 main)
+  tau export <sessionId> [--format jsonl|markdown] [--out <path>]  导出会话(本地文件,不外发)
   tau --help            显示本帮助
 
 选项:
@@ -45,6 +46,9 @@ export async function runCli(argv: string[]): Promise<number> {
   }
   if (sub === "replay") {
     return replayMode(argv.slice(1))
+  }
+  if (sub === "export") {
+    return exportMode(argv.slice(1))
   }
   if (sub === "serve") {
     return serveMode(argv.slice(1))
@@ -102,6 +106,14 @@ function parseSessionId(args: string[]): string {
     return a
   }
   return "main"
+}
+
+/** 取选项旗标后的取值(如 --out <path>);无置或紧随为旗标则返回 undefined。 */
+function getOptValue(args: string[], flag: string): string | undefined {
+  const i = args.indexOf(flag)
+  if (i < 0) return undefined
+  const v = args[i + 1]
+  return v !== undefined && !v.startsWith("-") ? v : undefined
 }
 
 async function printMode(rest: string[]): Promise<number> {
@@ -349,6 +361,72 @@ async function replayMode(args: string[]): Promise<number> {
   console.error(`tau replay:${events.length} 条事件 (session=${sessionId})`)
   runtime.store.close?.()
   return 0
+}
+
+/** `tau export <sessionId>`:导出会话为 JSONL(事件流)或 Markdown(投影转述),本地落盘不外发。 */
+async function exportMode(args: string[]): Promise<number> {
+  const opts = parseCommonOpts(args)
+  const sessionId = parseSessionId(args)
+  const format = getOptValue(args, "--format") ?? "jsonl"
+  const out = getOptValue(args, "--out")
+  if (format !== "jsonl" && format !== "markdown") {
+    console.error(`tau export:未知 --format "${format}"(支持 jsonl|markdown)`)
+    return 2
+  }
+  const runtime = compose({
+    cwd: opts.workspace,
+    workspaceRoots: [opts.workspace],
+    skipEnhancer: true,
+    ...(opts.storePath !== undefined ? { storePath: opts.storePath } : {}),
+  })
+
+  let body: string
+  if (format === "markdown") {
+    const history = runtime.session.project().history
+    body = history.map(renderMessageMarkdown).join("\n\n")
+  } else {
+    const events = runtime.store.events.replay(sessionId)
+    body = events.map((e) => JSON.stringify(e)).join("\n")
+  }
+
+  if (out !== undefined) {
+    await Bun.write(out, `${body}\n`)
+    console.error(`tau export:${format} → ${out} (session=${sessionId})`)
+  } else {
+    process.stdout.write(`${body}\n`)
+    console.error(`tau export:${format} (session=${sessionId})`)
+  }
+  runtime.store.close?.()
+  return 0
+}
+
+/** 单条 Message → Markdown(转述流):文本原样,thinking 引述,artifact 引用,工具调用/结果列出。 */
+function renderMessageMarkdown(msg: Message): string {
+  const parts: string[] = [`### ${msg.role}`]
+  for (const b of msg.content) {
+    switch (b.type) {
+      case "text":
+        parts.push(b.text)
+        break
+      case "thinking":
+        parts.push(`> _thinking:_ ${b.text}`)
+        break
+      case "artifact":
+        parts.push(`[artifact${b.mime ? ` ${b.mime}` : ""}${b.size !== undefined ? ` ${b.size}B` : ""}${b.ref ? ` ref=${b.ref}` : ""}]`)
+        break
+      case "image":
+        parts.push("[image]")
+        break
+    }
+  }
+  for (const call of msg.toolCalls) {
+    parts.push(`- tool: \`${call.name}\` ${JSON.stringify(call.arguments)}`)
+  }
+  for (const ref of msg.toolResults) {
+    if (ref.error) parts.push(`- error: [${ref.error.code}] ${ref.error.message}`)
+    else if (ref.result) parts.push(`- result: ${ref.result.stdout ?? ""}`)
+  }
+  return parts.join("\n")
 }
 
 async function evalSuite(): Promise<number> {
