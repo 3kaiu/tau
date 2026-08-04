@@ -57,4 +57,6 @@
 - 插件 API 走 JSON 协议(opencode 兼容),第三方可用任意语言写插件
 
 ## 边界(明确不做)
-不做调度(委托 orchestrate)、不做持久化(用 store)、不做工具执行。
+- 不做调度(委托 orchestrate)、不做工具执行。
+- 不做持久化写入:运行期状态(记忆、装载缓存元数据等)写入经 `store`;增强层不持有写权威。
+- **装载期只读例外**:`enhancer.ts`/`skills.ts` 在装载自身声明式资源(AGENTS.md、skill 目录与文件)时,允许以 `node:fs` 只读方式(`readFileSync`/`readdirSync`/`existsSync`/`statSync`)读取本包/配置约定的资源目录。**这是"声明式装载"的必要实现,不是持久化,也不写盘。** 任何写盘操作仍唯一经 `store` 与 `action` 出口。
