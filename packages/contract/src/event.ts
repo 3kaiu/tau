@@ -37,13 +37,14 @@ export const ToolEventSchema = EventBaseSchema.extend({
 })
 export type ToolEvent = z.infer<typeof ToolEventSchema>
 
-/** permission_request 广播带 params 摘要(summary),不携带原始参数——分支不携带 secrets。 */
+/** permission_request 广播带 params 摘要(summary),不携带原始参数——分支不携带 secrets。
+ * state 与 ApprovalState 同词:requested/granted/denied/expired/revoked(超时决议 = expired,不再另造 timeout)。 */
 export const PermissionEventSchema = EventBaseSchema.extend({
   kind: z.literal("permission"),
   requestId: z.string(),
   toolName: z.string(),
   summary: z.string(),
-  state: z.enum(["requested", "granted", "denied", "timeout"]),
+  state: z.enum(["requested", "granted", "denied", "expired", "revoked"]),
 })
 export type PermissionEvent = z.infer<typeof PermissionEventSchema>
 
@@ -187,6 +188,52 @@ export function redactFields<T>(value: T, paths: readonly string[]): T {
     return out
   }
   return walk(value, "", false) as T
+}
+
+// ---------- 事件级脱敏(契约承诺"落盘时脱敏"的执行面) ----------
+
+/** secret 模式表:命中即脱敏(curl 带凭证 / PEM 私钥 / 环境变量式赋值)。与 action 工具结果检测同源。 */
+export const SECRET_PATTERNS: readonly RegExp[] = [
+  /(^|\s)(curl|wget)\b[^\n]*(-u\s+\S+|--user\s+\S+)/,
+  /-----BEGIN [A-Z ]+PRIVATE KEY-----/,
+  /(?:API|SECRET|TOKEN|KEY|PASSWORD)\s*=\s*["']?[A-Za-z0-9_-]{16,}/i,
+]
+
+/** 单串脱敏:PEM 私钥保留 BEGIN/END 头尾(仅替换主体),其余命中整体替换。 */
+export function maskSecretText(text: string): string {
+  let out = text.replace(
+    /-----BEGIN ([A-Z ]+)PRIVATE KEY-----[\s\S]*?-----END ([A-Z ]+)PRIVATE KEY-----/g,
+    (_m, begin: string, end: string) => `-----BEGIN ${begin}PRIVATE KEY-----\n[redacted]\n-----END ${end}PRIVATE KEY-----`,
+  )
+  for (const re of SECRET_PATTERNS) {
+    if (!re.source.includes("BEGIN")) out = out.replace(re, "[redacted]")
+  }
+  return out
+}
+
+/** 事件递归脱敏:扫描全部字符串值,命中 → 字段路径记入 redact + 值替换为 "[redacted]"。
+ * 这是"redact 声明落盘脱敏"的构造点——之前 redact 恒 [],承诺空转。 */
+export function redactEventSecrets(event: Event): Event {
+  const paths: string[] = []
+  const walk = (node: unknown, path: string): unknown => {
+    if (typeof node === "string") {
+      if (SECRET_PATTERNS.some((re) => re.test(node))) {
+        paths.push(path)
+        return maskSecretText(node)
+      }
+      return node
+    }
+    if (node === null || typeof node !== "object") return node
+    if (Array.isArray(node)) return node.map((item, i) => walk(item, `${path}[${i}]`))
+    const out: Record<string, unknown> = {}
+    for (const [key, val] of Object.entries(node as Record<string, unknown>)) {
+      out[key] = walk(val, path === "" ? key : `${path}.${key}`)
+    }
+    return out
+  }
+  const masked = walk(event, "") as Event
+  if (paths.length === 0) return event
+  return { ...masked, redact: [...event.redact, ...paths] }
 }
 
 /** 会话恢复告知断言:eval 用——崩溃恢复后必须存在 recovery 事件(模型与用户可见)。 */

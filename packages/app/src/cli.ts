@@ -237,6 +237,13 @@ async function printMode(rest: string[]): Promise<number> {
 
   const runtime = await composeAsync(composeOpts(opts))
 
+  // 远程目录增强(失败静默回退静态目录)
+  await applyRemoteCatalog(runtime.llm, {
+    onResult: (ok, count) => {
+      if (ok) console.error(`tau:已合并远程模型目录(+${count - runtime.llm.models().length} 新模型)`)
+    },
+  })
+
   // --json:逐事件 wire JSONL(机器消费,与 tau log 同格式);否则人类可读转述
   const renderer = opts.json ? null : createPrintRenderer({ showToolCalls: true })
   runtime.scheduler.subscribe((event) => {
@@ -251,11 +258,13 @@ async function printMode(rest: string[]): Promise<number> {
 
   const result = await runtime.face.publish({ kind: "prompt", sender: { clientId: "cli", kind: "cli" }, text: prompt })
   if (result.accepted === false) {
+    runtime.session.close()
     console.error(`tau:${result.detail}`)
     return 1
   }
   const tail = renderer?.flush() ?? ""
   if (tail !== "") console.log(tail)
+  runtime.session.close()
   await runtime.mcpDispose?.()
   return 0
 }
@@ -288,6 +297,7 @@ async function tuiMode(args: string[]): Promise<number> {
   })
 
   await tui.run()
+  runtime.session.close()
   return 0
 }
 
@@ -297,6 +307,13 @@ async function serveMode(args: string[]): Promise<number> {
   const port = portIdx >= 0 && args[portIdx + 1] !== undefined ? Number(args[portIdx + 1]) : 3000
 
   const runtime = await composeAsync(composeOpts(opts))
+
+  // 远程目录增强(失败静默回退静态目录)
+  await applyRemoteCatalog(runtime.llm, {
+    onResult: (ok, count) => {
+      if (ok) console.error(`tau:已合并远程模型目录(+${count - runtime.llm.models().length} 新模型)`)
+    },
+  })
 
   const { serveHttp } = await import("@tau/surface")
   const server = serveHttp(
@@ -322,6 +339,7 @@ async function serveMode(args: string[]): Promise<number> {
     })
   })
 
+  runtime.session.close()
   return 0
 }
 
@@ -330,12 +348,20 @@ async function acpMode(args: string[]): Promise<number> {
 
   const runtime = await composeAsync(composeOpts(opts))
 
+  // 远程目录增强(失败静默回退静态目录)
+  await applyRemoteCatalog(runtime.llm, {
+    onResult: (ok, count) => {
+      if (ok) console.error(`tau:已合并远程模型目录(+${count - runtime.llm.models().length} 新模型)`)
+    },
+  })
+
   const { runAcpServer } = await import("@tau/surface")
   console.error(`tau acp:ACP 服务器启动(JSON-RPC over stdio)`)
   await runAcpServer({
     face: runtime.face,
     replay: () => runtime.store.events.replay(runtime.session.sessionId),
   })
+  runtime.session.close()
 
   return 0
 }
@@ -764,7 +790,7 @@ async function scheduleMode(args: string[]): Promise<number> {
         runtime.scheduler.goals.set(makeGoal(e.id, e.goalText))
         const result = await runtime.face.publish({
           kind: "prompt",
-          sender: { clientId: "cron", kind: "cli" },
+          sender: { clientId: "cron", kind: "system" },
           text: e.goalText,
         })
         if (result.accepted === false) {
@@ -773,6 +799,7 @@ async function scheduleMode(args: string[]): Promise<number> {
         } else {
           console.log(`tau schedule:${e.id} 已触发 (session=${e.sessionId})`)
         }
+        runtime.session.close()
       }
       return failed > 0 ? 1 : 0
     }

@@ -61,11 +61,19 @@ export function listArtifacts(store: Store, sessionId: string): readonly Artifac
   return store.artifacts.list(sessionId)
 }
 
-export function purgeArtifact(store: Store, ref: string): void {
+/** purge 悬空提示:删前检查活跃历史是否仍引用该 ref;返回 true = 无残留引用,false = 产生了悬空引用(调用方应提示)。 */
+export function purgeArtifact(store: Store, ref: string): boolean {
+  const record = store.artifacts.get(ref)
+  if (record === null) return true
+  const messages = store.messages.list(record.sessionId).messages
+  const stillReferenced = messages.some((m) => m.content.some((b) => b.type === "artifact" && b.ref === ref))
   store.artifacts.delete(ref)
+  return !stillReferenced
 }
 
-/** 消息内容外置:超过阈值的 text 块 → artifact 引用块(正文存 store,历史不烧上下文)。 */
+const encoder = new TextEncoder()
+
+/** 消息内容外置:超过阈值的 text 块(按字节计,CJK 等宽字符不被字符计数低估)→ artifact 引用块(正文存 store,历史不烧上下文)。 */
 export function externalizeContent(
   store: Store,
   sessionId: string,
@@ -74,7 +82,7 @@ export function externalizeContent(
 ): ContentBlock[] {
   const out: ContentBlock[] = []
   for (const block of content) {
-    if (block.type === "text" && block.text.length > thresholdBytes) {
+    if (block.type === "text" && encoder.encode(block.text).length > thresholdBytes) {
       out.push(storeArtifact(store, { sessionId, content: block.text, mime: "text/plain" }))
     } else {
       out.push(block)

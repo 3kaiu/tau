@@ -284,7 +284,7 @@ describe("action 平面:补齐工具面(edit/grep/find/ls/ask_user/system/catalo
     const out = await plane.execute({ sessionId: "s", toolCallId: "tmo1", name: "bash", args: { command: "echo ok" }, cwd: "/tmp/tau-test" })
     expect(out.ok).toBe(false)
     if (!out.ok) expect(out.error.code).toBe("rejected")
-    expect(events.some((e) => e.kind === "permission" && e.state === "timeout")).toBe(true)
+    expect(events.some((e) => e.kind === "permission" && e.state === "expired")).toBe(true)
   })
 
   it("onPermission 回调:决议后发 granted/denied 事件(双轨)", async () => {
@@ -312,7 +312,7 @@ describe("action 平面:补齐工具面(edit/grep/find/ls/ask_user/system/catalo
     })
     const out = await plane.execute({ sessionId: "s", toolCallId: "c1", name: "bash", args: { command: "echo hi" }, cwd: "/tmp/tau-test" })
     expect(out.ok).toBe(false)
-    expect(events.some((e) => e.kind === "permission" && e.state === "timeout")).toBe(true)
+    expect(events.some((e) => e.kind === "permission" && e.state === "expired")).toBe(true)
   })
 })
 

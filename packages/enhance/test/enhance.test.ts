@@ -47,14 +47,15 @@ triggers:
     expect(body).toBe(raw)
   })
 
-  it("损坏的 frontmatter 不崩溃", () => {
+  it("损坏的 frontmatter 不崩溃、不静默降级为正文注入", () => {
     const raw = `---
 name: [invalid yaml
 ---
 body`
-    const { frontmatter, body } = parseFrontmatter(raw)
+    const { frontmatter, body, error } = parseFrontmatter(raw)
     expect(frontmatter).toBeNull()
-    expect(body).toBe(raw)
+    expect(error).toContain("frontmatter YAML 解析失败")
+    expect(body).toBe("")
   })
 })
 

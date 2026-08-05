@@ -2,7 +2,7 @@
 // 与 memory 行为逐项对齐(差分测试兜底);单写者语义以 SQLite 文件锁表达。
 
 import { Database, type Statement } from "bun:sqlite"
-import type { Event, Message, SessionSnapshot } from "@tau/contract"
+import { redactEventSecrets, type Event, type Message, type SessionSnapshot } from "@tau/contract"
 import type { ArtifactMeta, ArtifactRecord, ArtifactTable, AuditEntry, AuditQuery, AuditTable, EventTable, KvEntry, KvTable, MessagePage, MessageTable, SessionTable, Store } from "./store.ts"
 import { extractSearchText, normalizeSearchQuery } from "./store.ts"
 import { migrate, type Db } from "./migrate.ts"
@@ -229,7 +229,8 @@ class SqliteEventTable implements EventTable {
   }
 
   append(sessionId: string, event: Event): void {
-    this.appendStmt.run(sessionId, event.id, event.kind, event.timestamp, JSON.stringify(event))
+    const safe = redactEventSecrets(event)
+    this.appendStmt.run(sessionId, safe.id, safe.kind, safe.timestamp, JSON.stringify(safe))
   }
 
   replay(sessionId: string): readonly Event[] {

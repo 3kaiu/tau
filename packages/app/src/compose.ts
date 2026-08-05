@@ -360,7 +360,8 @@ function finishRuntime(prep: Prep, mcpEvents: readonly Event[]): TauRuntime {
     llm ??
     createLlmKernel({
       catalog,
-      getApiKey: (model) => process.env[`TAU_${model.provider.provider.toUpperCase()}_API_KEY`] ?? null,
+      // provider id 含 "-"(如 openai-compatible)时规范化环境变量名:TAU_OPENAI_COMPATIBLE_API_KEY
+      getApiKey: (model) => process.env[`TAU_${model.provider.provider.toUpperCase().replace(/[^A-Z0-9_]/g, "_")}_API_KEY`] ?? null,
     })
 
   const scheduler = createScheduler(

@@ -14,7 +14,7 @@ LLM 的记忆。回答唯一问题:"LLM 现在该看到什么"。`project()` 是
 - 工具注入裁剪(**Config tier 规则**):opts 提供 `toolTierRules` 时投影 tools = T0 常驻 + tool:catalog 恒在 + 本 turn 经 `session.requestTools(names)` 请求过的 T1(orchestrate 在 T1 工具调用落下后请求,用过即注入后续迭代;`beginTurn` 重置);缺省(无规则)全量注入,兼容旧行为——"每轮工具描述 token 只花在会用到的"
 - `session.setGoal(goal)` — Goal 输入通道(orchestrate 判定结果经此写入,投影可见,依赖单向向下)
 - `session.pendSyscall(ask)` / `session.resolvePending(questionId)` — ask_user 挂起/恢复(模型在等你回答,UI/模型均可见)
-- `session.diff(fromEpoch, toEpoch)` — 投影差分(消费方增量渲染,免全量对比)——**易失性**:差异基于进程内 epochHistory,重启后任意此后 epoch 缺失返回 `epoch-history-missing`;消费方须退化为全量 snapshot 拉取(SPEC 第 3 条快照权威兜底),不把 diff 当持久承诺
+- `session.diff(fromEpoch, toEpoch)` — 投影差分(消费方增量渲染,免全量对比)——**易失性**:差异基于进程内 epochHistory(admit/appendMessage 时记录),**未记录过的 epoch(进程内从未 admit 的空 epoch,或重启后任意此后 epoch)**均返回 `epoch-history-missing`;消费方须退化为全量 snapshot 拉取(SPEC 第 3 条快照权威兜底),不把 diff 当持久承诺
 - `session.recent()` — 最近活动块(重试/中断/模型切换/压缩告警/**recovery 告警**,进投影)——**一切自动行为进投影,无例外**
 - 大载荷外置:`session.storeArtifact` / `readArtifact` / `listArtifacts` / `purgeArtifact`——text 块超阈值(缺省 16KB)自动外置为 artifact 引用(正文存 store,历史/投影/事件流只含引用,模型经 `artifact:read` 工具按需取回,不烧上下文)
 - 崩溃恢复:重启后从 store 重放,不靠内存;**副作用悬置判定**:审计带 `turnId`(提交点 = orchestrate 在 turn 尾部 `session.commitTurn(turnId)` 写入),恢复时按"审计最新 turn 晚于已提交锚点"判定上次 turn 未提交的 syscall 清单,`recovery` 事件 detail 带清单——模型检查文件而非瞎猜

@@ -12,6 +12,8 @@ wire 表示 = JSON;JSON Schema 由 `jsonSchemas()` 导出(draft 2020-12)。任�
 | `timeout` | 超时 | 按预算重试或放弃 |
 | `cancelled` | 被取消(用户 abort) | 停止 |
 | `rejected` | 用户拒绝(ask 规则) | 停止,不自动换路径 |
+| `insufficient_funds` | 余额不足(402) | 停止,不可重试 |
+| `overloaded` | 服务过载(429/资源紧张) | 错峰重试 |
 | `internal` | 内部错误 | 上报,不重试 |
 
 `ToolResult`:exitCode 为 null 表示无进程语义;stdout/stderr 分离。`truncated=true` 时按 `totalPages` 分页,续读经工具 `result` 参数 `page`(`RESULT_PAGE_TOOL_NAME`/`RESULT_PAGE_PARAM`),不得整段重灌。

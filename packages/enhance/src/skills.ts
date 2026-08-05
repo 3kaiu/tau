@@ -17,21 +17,33 @@ export type SkillEntry = {
 export type SkillCatalog = {
   names: string[]
   entries: Map<string, SkillEntry>
+  /** 装载时跳过的坏文件(bad frontmatter 不静默降级为正文注入)。 */
+  skipped: string[]
 }
 
 /** 扫描目录下所有 .md 文件,解析 frontmatter 构建 skill 目录。缓存传入时按文件增量装载。 */
 export function loadSkills(dir: string, cache?: LoaderCache): SkillCatalog {
   const entries = new Map<string, SkillEntry>()
+  const skipped: string[] = []
   const loader = cache ?? new LoaderCache()
   for (const file of scanMarkdown(dir)) {
-    const loaded = loader.load(file, (raw) => parseSkillFile(file, raw))
-    if (loaded !== null) entries.set(loaded.value.name, loaded.value)
+    try {
+      const loaded = loader.load(file, (raw) => parseSkillFile(file, raw))
+      if (loaded !== null) entries.set(loaded.value.name, loaded.value)
+    } catch (e) {
+      // 坏 frontmatter 文件跳过,不阻断其余技能装载;skipped 列表供上层告警
+      skipped.push(`${file}:${(e as Error).message}`)
+    }
   }
-  return { names: [...entries.keys()], entries }
+  return { names: [...entries.keys()], entries, skipped }
 }
 
 function parseSkillFile(file: string, raw: string): SkillEntry {
-  const { frontmatter, body } = parseFrontmatter(raw)
+  const { frontmatter, body, error } = parseFrontmatter(raw)
+  if (error !== undefined) {
+    // 坏 frontmatter 整文件跳过:不把"声明段 + 原文"当正文注入(静默降级 = 契约污染)
+    throw new Error(`${file}:${error}`)
+  }
   const name = frontmatter?.name ?? basename(file, ".md")
   return {
     name,

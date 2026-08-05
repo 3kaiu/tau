@@ -1,7 +1,7 @@
 // @tau/store — memory.ts:内存实现(测试/评测/内存会话用,同接口)。
 // 与 sqlite 行为逐项对齐(差分测试兜底在 eval);单写者锁由 sqlite 文件驱动承担(跨进程),memory 驱动为进程内实例无跨进程竞争。
 
-import type { Event, Message, SessionSnapshot } from "@tau/contract"
+import { redactEventSecrets, type Event, type Message, type SessionSnapshot } from "@tau/contract"
 import type { ArtifactMeta, ArtifactRecord, ArtifactTable, AuditEntry, AuditQuery, AuditTable, EventTable, KvEntry, KvTable, MessagePage, MessageTable, SessionTable, Store } from "./store.ts"
 import { extractSearchText, normalizeSearchQuery } from "./store.ts"
 
@@ -75,8 +75,9 @@ class MemoryMessageTable implements MessageTable {
 class MemoryEventTable implements EventTable {
   readonly bySession = new Map<string, Event[]>()
   append(sessionId: string, event: Event): void {
+    const safe = redactEventSecrets(event)
     const list = this.bySession.get(sessionId) ?? []
-    list.push(event)
+    list.push(safe)
     this.bySession.set(sessionId, list)
   }
   replay(sessionId: string): readonly Event[] {

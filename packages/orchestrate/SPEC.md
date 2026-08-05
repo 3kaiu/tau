@@ -11,7 +11,7 @@
 - `scheduler.waitForIdle()`
 - **Session Goals**:`scheduler.goals.set(goal)` — 每 turn 后判定,未完成继续,超限停止;**判定结果经 `session.setGoal()` 写入投影**(编排不拼 Context,依赖单向向下)
 - **子会话**:`fork(manifest)` → 子 session 句柄(降级 capability,durable,可 join/abort)
-- **Multi-run**:`multiRun(manifest)` — 一任务 N 模型并行 spawn 子会话(各带独立 worktree,经 action 创建,隔离于主工作区);`fusion(runs)` — 汇总各子会话 diff 生成新会话(Fusion 语义:diff 并集 + 冲突标注,产出物为可继续对话的新会话)
+- **Multi-run**:`multiRun(manifest)` — 一任务 N 模型并行 spawn 子会话(各带独立 worktree,经 action 创建,隔离于主工作区);`fusion(runs)` — 汇总各子会话最终产出生成新会话(Fusion 语义:产出并集 + 冲突标注交模型裁决,产出物为可继续对话的新会话)
 - **定时唤醒**:纯判定 `parseCron` / `cronMatches` / `nextAfter` / `isDue` / `dueEntries`(五段 cron 最小子集 + `@hourly`/`@daily`/`@weekly`/`@monthly`/`@yearly` 别名,分钟粒度,本地时区);调度表持久化 `loadSchedules` / `saveSchedules` / `upsertSchedule` / `removeSchedule` / `markRan`(落 `store.kv`,不新建表)。到点后由调用方(app CLI)`goals.set(goal)` + 唤醒——**编排给判定与调度表,不起常驻守护进程**(由系统 cron 驱动 `tau schedule run`)
 - 崩溃恢复:重放 store 决定续跑点
 - **wake 产出**:每次唤醒(steer/answer/goal 续跑/cron/retry/resume)附 `wake.reason + source`,模型永远知道"为什么现在醒"

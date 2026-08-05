@@ -434,6 +434,23 @@ describe("崩溃恢复", () => {
     expect(second.snapshot().status).toBe("closed")
   })
 
+  it("lifecycle 产出:created 仅新会话发一次;closed 正常退出可治理区分;checkpointed 随压缩", () => {
+    const store = createStore("memory")
+    const first = createSession(makeOptions(store))
+    const events = store.events.replay("s1")
+    expect(events.filter((e) => e.kind === "lifecycle" && e.state === "created")).toHaveLength(1)
+    first.admit({ text: "hi", source: "cli", wake: "prompt" })
+    first.compact("test", "summary")
+    const afterCompact = store.events.replay("s1")
+    expect(afterCompact.some((e) => e.kind === "lifecycle" && e.state === "checkpointed")).toBe(true)
+    first.close()
+    expect(store.events.replay("s1").some((e) => e.kind === "lifecycle" && e.state === "closed")).toBe(true)
+    const reopened = createSession(makeOptions(store))
+    const states = store.events.replay("s1").filter((e): e is Extract<typeof e, { kind: "lifecycle" }> => e.kind === "lifecycle").map((e) => e.state)
+    expect(states.filter((s) => s === "created")).toHaveLength(1)
+    expect(reopened.snapshot().status).toBe("closed")
+  })
+
   it("已提交 turn 崩溃不误报(提交点锚定后无悬置)", () => {
     const store = createStore("memory")
     const first = createSession(makeOptions(store))

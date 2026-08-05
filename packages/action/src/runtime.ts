@@ -3,7 +3,7 @@
 // ask_user 挂起经 questionId 恢复;detach 后台任务可轮询/取消;危险命令强制询问(不走静默允许)。
 
 import type { Store } from "@tau/store"
-import { createEventIdGenerator, isDangerousCommand, toolError } from "@tau/contract"
+import { createEventIdGenerator, isDangerousCommand, maskSecretText, SECRET_PATTERNS, toolError } from "@tau/contract"
 import type { Event, ToolError, ToolEvent, ToolResult } from "@tau/contract"
 import { ToolRegistry } from "./registry.ts"
 import { CapabilityGate } from "./capability.ts"
@@ -29,12 +29,6 @@ function raceApproval(promise: Promise<boolean>, timeoutMs: number, signal?: Abo
     })
   })
 }
-
-const SECRET_PATTERNS: readonly RegExp[] = [
-  /(^|\s)(curl|wget)\b[^\n]*(-u\s+\S+|--user\s+\S+)/,
-  /-----BEGIN [A-Z ]+PRIVATE KEY-----/,
-  /(?:API|SECRET|TOKEN|KEY|PASSWORD)\s*=\s*["']?[A-Za-z0-9_-]{16,}/i,
-]
 
 const BINARY_NUL = "\u0000"
 const MAX_RESULT_BYTES = 64 * 1024
@@ -254,7 +248,7 @@ export class ActionPlane {
       // 回调路径同样受超时约束(P1-2):无人应答不得永久挂起,超时 = 拒绝(与挂起路径同语义)
       const approved = await raceApproval(this.opts.onPermission({ toolCallId: req.toolCallId, toolName: req.name, summary }), this.opts.permissionTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS, req.signal)
       if (approved === undefined) {
-        emit({ kind: "permission", requestId, toolName: req.name, summary, state: "timeout" })
+        emit({ kind: "permission", requestId, toolName: req.name, summary, state: "expired" })
         recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: summary, outcome: "rejected", durationMs: Date.now() - started, turnId: req.turnId })
         return false
       }
@@ -274,7 +268,7 @@ export class ActionPlane {
     return new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
         this.pendingRequests.delete(requestId)
-        emit({ kind: "permission", requestId, toolName: req.name, summary, state: "timeout" })
+        emit({ kind: "permission", requestId, toolName: req.name, summary, state: "expired" })
         recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: summary, outcome: "rejected", durationMs: Date.now() - started, turnId: req.turnId })
         resolve(false)
       }, this.opts.permissionTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS)
@@ -492,18 +486,13 @@ function normalizeError(err: unknown): ToolError {
   return toolError("internal", String(err))
 }
 
-/** 工具结果过 secret 模式检测:命中 → redact 标记 + 事件告警(不阻断,提示模型)。 */
+/** 工具结果过 secret 模式检测:命中 → 替换 + 事件告警(不阻断,提示模型)。模式表与落盘脱敏同源(contract)。 */
 function markSecrets(result: ToolResult): { result: ToolResult; hasSecret: boolean } {
   const probe = `${result.stdout ?? ""}\n${result.stderr ?? ""}`
   if (probe.length === 0 || !SECRET_PATTERNS.some((re) => re.test(probe))) {
     return { result, hasSecret: false }
   }
-  const masked = (text: string | null): string | null => {
-    if (text === null) return null
-    let out = text
-    for (const re of SECRET_PATTERNS) out = out.replace(re, (m) => (re.source.includes("BEGIN") ? m.replace(/[A-Z0-9+/=\s]{16,}/g, "[redacted]") : "[redacted]"))
-    return out
-  }
+  const masked = (text: string | null): string | null => (text === null ? null : maskSecretText(text))
   return { result: { ...result, stdout: masked(result.stdout), stderr: masked(result.stderr) }, hasSecret: true }
 }
 

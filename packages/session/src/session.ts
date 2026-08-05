@@ -10,6 +10,7 @@ import {
   type Model,
   type PendingSyscall,
   type SessionSnapshot,
+  type SenderKind,
   type WakeReason,
   ModelSchema,
   createEventIdGenerator,
@@ -96,6 +97,8 @@ export type AdmitInput = {
   source: string
   wake: WakeReason
   retention?: "high" | "normal"
+  /** 来源界面(审计溯源):face.publish 透传 command.sender.kind,缺省 "cli" 兼容直连调用。 */
+  senderKind?: SenderKind
 }
 
 export type SessionDiff = {
@@ -135,7 +138,8 @@ export interface Session {
   storeArtifact(input: { ref?: string; content: string; mime?: string }): ArtifactBlock
   readArtifact(ref: string): ArtifactBody | null
   listArtifacts(): readonly ArtifactMeta[]
-  purgeArtifact(ref: string): void
+  /** 删除 artifact;返回 false = 活跃历史仍引用(悬空),调用方应提示。 */
+  purgeArtifact(ref: string): boolean
 }
 
 // 事件/消息 id 同一单调序列(进程前缀 + 定宽序号,字典序 = 因果序;消息 id 与事件 id 全局唯一)
@@ -271,7 +275,7 @@ export function createSession(options: SessionOptions): Session {
         timestamp: clock().wall,
         redact: [],
         kind: "input_accepted",
-        command: { kind: "prompt", sender: { clientId: input.source, kind: "cli" }, text: receiptText },
+        command: { kind: "prompt", sender: { clientId: input.source, kind: input.senderKind ?? "cli" }, text: receiptText },
       })
       store.messages.append(sessionId, message)
       emit({ id: uuid(), timestamp: clock().wall, redact: [], kind: "transcript", message })
@@ -458,6 +462,9 @@ export function createSession(options: SessionOptions): Session {
         },
         touch,
       })
+      // 压缩完成 = 检查点落盘(契约 LifecycleEvent.checkpointed 的产出路径)
+      emit({ id: uuid(), timestamp: clock().wall, redact: [], kind: "lifecycle", sessionId, state: "checkpointed" })
+      register()
     },
 
     retrieve(optionsIn: { query: string; offset?: number; limit?: number }) {
@@ -532,6 +539,10 @@ export function createSession(options: SessionOptions): Session {
     },
   }
 
+  // 新会话出生事件:治理面区分"创建"与"恢复"(created 仅发一次,重启恢复不发)
+  if (store.sessions.get(sessionId) == null) {
+    emit({ id: uuid(), timestamp: clock().wall, redact: [], kind: "lifecycle", sessionId, state: "created" })
+  }
   register()
 
   return api

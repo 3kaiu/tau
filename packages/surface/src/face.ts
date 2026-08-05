@@ -96,11 +96,13 @@ export function createCommandFace(deps: FaceDeps): CommandFace {
       } satisfies InputAcceptedEvent)
       switch (command.kind) {
         case "prompt": {
-          const result = await deps.orchestrate.prompt({ text: command.text, source: "prompt" })
+          // cron 定时唤醒(source=cron):sender 标识由 cli schedule run 携带(clientId "cron")
+          const source = command.sender.clientId === "cron" ? "cron" : "prompt"
+          const result = await deps.orchestrate.prompt({ text: command.text, source, sender: command.sender.kind })
           return { accepted: true, eventId: uuid(), detail: result.text }
         }
         case "steer": {
-          await deps.orchestrate.steer({ text: command.text, source: "steer" })
+          await deps.orchestrate.steer({ text: command.text, source: "steer", sender: command.sender.kind })
           return { accepted: true, eventId: uuid(), detail: "steer 已排队" }
         }
         case "abort": {

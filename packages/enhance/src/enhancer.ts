@@ -64,7 +64,7 @@ export function createEnhancer(opts: EnhancerOptions): Enhancer {
   const agentsMdPath = opts.agentsMdPath ?? join(opts.cwd, "AGENTS.md")
   const loader = new LoaderCache()
 
-  let state: EnhancerState = { skills: { names: [], entries: new Map() }, agentsMd: null }
+  let state: EnhancerState = { skills: { names: [], entries: new Map(), skipped: [] }, agentsMd: null }
 
   function load(): EnhancerState {
     const skills = loadSkills(skillsDir, loader)

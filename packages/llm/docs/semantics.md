@@ -24,6 +24,8 @@
 | 超时(408/网络超时) | `timeout` | true |
 | 401/403 | `permission_denied` | false |
 | 404 | `not_found` | false |
+| 402 / 余额不足 | `insufficient_funds` | false |
+| `insufficient_system_resource` / `overloaded` 消息 | `overloaded` | true |
 | 取消(AbortError) | `cancelled` | false |
 | 其余 | `internal` | false |
 

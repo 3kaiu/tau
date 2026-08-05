@@ -5,7 +5,7 @@ export type { Scheduler, SchedulerOptions, SchedulerDeps, SchedulerInput, TurnRe
 export { LoopGuard, turnIdOf } from "./lifecycle.ts"
 export { GoalJudge, judgeGoalHeuristic } from "./goals.ts"
 export type { GoalJudgeResult, GoalJudgeOptions } from "./goals.ts"
-export { runMultiRun, selectBestRun, fuseRunResults, createFusedSession } from "./multirun.ts"
+export { runMultiRun, selectBestRun, createFusedSession } from "./multirun.ts"
 export type { MultiRunConfig, MultiRunResult, RunResult, MultiRunDeps } from "./multirun.ts"
 export { runSubagent, depthOf, listSubagents, subagentUsage, SUBAGENT_DEFAULT_TOOLS } from "./subagent.ts"
 export type { SubagentDeps, SubagentManifest, SubagentOptions, SubagentResult, SubagentStatus, SubagentRegEntry } from "./subagent.ts"

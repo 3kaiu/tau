@@ -2,7 +2,7 @@
 // 不生成上下文(委托 session.project)、不执行工具(委托 action.execute);
 // turn 是原子单位;任何中断是状态机输入;重试/打断/循环全可见可审计。
 
-import { createEventIdGenerator, estimateTokens, type ContextProjection, type Event, type Goal, type Message } from "@tau/contract"
+import { createEventIdGenerator, estimateTokens, type ContextProjection, type Event, type Goal, type Message, type SenderKind, type WakeReason } from "@tau/contract"
 import type { LlmKernel, LlmCollectResult, LlmRequest } from "@tau/llm"
 import type { Session } from "@tau/session"
 import type { ActionPlane } from "@tau/action"
@@ -42,7 +42,10 @@ export type SchedulerOptions = {
 
 export type SchedulerInput = {
   text: string
-  source?: "prompt" | "steer" | "goal_continue"
+  /** 唤醒来源 = wake.reason 全集(契约七值):模型永远知道"为什么现在醒"。 */
+  source?: WakeReason
+  /** 发布界面(审计溯源):face 透传 command.sender.kind,缺省 "cli"。 */
+  sender?: SenderKind
 }
 
 export type TurnResult = {
@@ -119,8 +122,8 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
   async function runTurn(input: SchedulerInput): Promise<TurnResult> {
     steerEpoch++
     const myEpoch = steerEpoch
-    const wakeReason = input.source === "steer" ? "steer" : input.source === "goal_continue" ? "goal_continue" : "prompt"
-    session.admit({ text: input.text, source: input.source ?? "prompt", wake: wakeReason })
+    const wakeReason = input.source ?? "prompt"
+    session.admit({ text: input.text, source: input.source ?? "prompt", wake: wakeReason, ...(input.sender !== undefined ? { senderKind: input.sender } : {}) })
     abortController = new AbortController()
     const signal = abortController.signal
 
@@ -201,7 +204,8 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
 
       const calls = result.toolCalls.slice(0, maxToolCallsPerTurn)
       const truncatedCalls = result.toolCalls.slice(maxToolCallsPerTurn)
-      appendAssistant(result.text, calls, false)
+      // 工具阶段截断(steer immediate 在飞工具中止后):与 llm 阶段中断同形态,assistant 消息标 interrupted
+      appendAssistant(result.text, calls, signal.aborted)
       if (truncatedCalls.length > 0) {
         // 超限静默删调 → 被删调用全部落显式 rejected 结果(模型可区分"被拦截"与"结果丢失")
         lastError = `工具调用超限:一轮最多 ${maxToolCallsPerTurn} 次(拦截 ${truncatedCalls.length} 个)`

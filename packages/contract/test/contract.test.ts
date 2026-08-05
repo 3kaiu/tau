@@ -32,6 +32,7 @@ import {
   parseMergedConfig,
   recentActivityFrom,
   redactFields,
+  redactEventSecrets,
   estimateTokens,
   toolError,
   toolResult,
@@ -228,6 +229,40 @@ describe("redactFields", () => {
       name: "bash",
     })
     expect(redactFields(obj, [])).toEqual(obj)
+  })
+})
+
+describe("redactEventSecrets:落盘脱敏构造点", () => {
+  it("命中 secret 模式的字符串 → 记 redact 路径 + 替换", () => {
+    const event = {
+      id: "e1",
+      timestamp: "t",
+      kind: "input_accepted",
+      command: { type: "prompt", text: "curl -u alice:pw123 https://x", model: "m", sessionId: "s", sender: { clientId: "c", kind: "cli" } },
+      redact: [],
+    }
+    const safe = redactEventSecrets(event as never) as { redact: string[] } & Record<string, unknown>
+    expect(safe.redact).toContain("command.text")
+    expect((safe.command as { text: string }).text).not.toContain("alice:pw123")
+    expect((safe.command as { text: string }).text).toContain("[redacted]")
+  })
+  it("环境变量式秘密替换,PEM 私钥保留头尾", () => {
+    const withKey = (text: string) =>
+      redactEventSecrets({ id: "e2", timestamp: "t", kind: "transcript", message: { id: "m", role: "assistant", content: text, createdAt: "t" }, redact: [] } as never) as {
+        message: { content: string }
+      }
+    expect(withKey("export API_KEY=abcdefghijklmnopqrstuvwx").message.content).not.toContain("abcdefghijklmnopqrstuvwx")
+    expect(withKey("export API_KEY=abcdefghijklmnopqrstuvwx").message.content).toContain("[redacted]")
+    const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA1C2VvRUYVjJhzKrQb6hKXkMqndG\n-----END RSA PRIVATE KEY-----"
+    const out = withKey(pem)
+    expect(out.message.content).toContain("BEGIN RSA PRIVATE KEY")
+    expect(out.message.content).not.toContain("MIIEowIB")
+  })
+  it("无秘密 → 原样返回,不新增 redact", () => {
+    const event = { id: "e3", timestamp: "t", kind: "input_accepted", command: { type: "prompt", text: "hi", model: "m", sessionId: "s", sender: { clientId: "c", kind: "cli" } }, redact: [] }
+    const safe = redactEventSecrets(event as never) as { redact: string[] }
+    expect(safe).toBe(event as never)
+    expect(safe.redact).toEqual([])
   })
 })
 

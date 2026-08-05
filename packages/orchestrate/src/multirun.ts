@@ -87,7 +87,12 @@ export async function runMultiRun(
         return { model, sessionId: childId, result, events, cwd: worktreeCwd }
       } finally {
         child.close()
-        await deps.action.execute({ sessionId: parent.sessionId, toolCallId: `wt-${childId}`, name: "worktree:rm", args: { name: worktreeName } })
+        // 清理失败不抛:残留由下一次 worktree:create 前的 rm 接管,单 run 异常不覆灭整批
+        try {
+          await deps.action.execute({ sessionId: parent.sessionId, toolCallId: `wt-${childId}`, name: "worktree:rm", args: { name: worktreeName } })
+        } catch {
+          /* 降级:允许残留,下次 rm 清理 */
+        }
       }
     })
 
@@ -136,24 +141,6 @@ export function selectBestRun(runs: RunResult[]): RunResult | null {
   return successfulRuns.reduce((best, current) => {
     return current.result.toolCalls < best.result.toolCalls ? current : best
   })
-}
-
-/** 融合多个运行结果:合并所有工具调用结果,去重。 */
-export function fuseRunResults(runs: RunResult[]): Map<string, unknown> {
-  const fused = new Map<string, unknown>()
-
-  for (const run of runs) {
-    for (const event of run.events) {
-      if (event.kind === "tool" && event.state === "completed" && event.result !== undefined) {
-        const key = `${event.name}:${JSON.stringify(event.args)}`
-        if (!fused.has(key)) {
-          fused.set(key, event.result)
-        }
-      }
-    }
-  }
-
-  return fused
 }
 
 /** 将数组分成指定大小的块。 */
