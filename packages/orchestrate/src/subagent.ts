@@ -66,6 +66,8 @@ export type SubagentDeps = {
   action: ActionPlane
   /** 父会话(取 cwd/workspaceRoots 作降级与 worktree 基)。 */
   session: Session
+  /** 子代理事件转发(父 TUI 观察子代理进度;缺省丢弃)。 */
+  onEvent?: (event: Event) => void
 }
 
 const REG_PREFIX = "subagent:"
@@ -231,7 +233,7 @@ export async function runSubagent(
     }
     const scheduler: Scheduler = createScheduler(
       { llm: deps.llm, session: child, action: makeRestrictedAction(deps.action, deps.store, allowedNames) },
-      { maxTurns, onEvent: () => {} },
+      { maxTurns, ...(deps.onEvent !== undefined ? { onEvent: deps.onEvent } : {}) },
     )
     try {
       return await scheduler.prompt({ text: manifest.task, source: "prompt" })

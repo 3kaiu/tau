@@ -421,7 +421,16 @@ function finishRuntime(prep: Prep, mcpEvents: readonly Event[]): TauRuntime {
     const task = String(req.args.task ?? "")
     if (task === "") return { exitCode: 1, stdout: "subagent_run 缺 task", stderr: null, truncated: false, totalPages: 1, page: 0 }
     const result = await runSubagent(
-      { llm: kernel, store, action, session },
+      {
+        llm: kernel,
+        store,
+        action,
+        session,
+        // 子代理事件 → 仅父 face 转发(实时观察),不落入 scheduler 持久化(避免污染父会话日志)
+        onEvent: (event) => {
+          bridges.face?.(event)
+        },
+      },
       {
         parentSessionId: sessionId,
         task,

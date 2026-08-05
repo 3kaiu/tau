@@ -614,8 +614,27 @@ describe("集成:底部状态栏(footer)", () => {
     expect(stripAnsi(expanded.join("\n"))).toContain("x".repeat(40))
   })
 
-  it("信息弹窗:show/dismiss,任意键关闭,宽度一致", () => {
-    const d = new InfoDialog()
+  it("子代理运行实时进度:子代理工具 + 转发 text_delta 可见", () => {
+    const tc = new TranscriptView()
+
+    // 父容器发起 subagent_run(工具 started) + 子代理实时 text_delta(经 onEvent 转发)
+    tc.consume(toolStarted("c1", "subagent_run", { task: "探索" }))
+    tc.consume(ev({ kind: "text_delta", text: "正在读目录", thinking: false }))
+    expect(tc.isStreaming()).toBe(true)
+    const running = stripAnsi(tc.render(80).join("\n"))
+    expect(running).toContain("subagent_run")
+    expect(running).toContain("正在读目录")
+
+    // 子代理完成:转发的 assistant 消息 + 父工具 completed
+    tc.consume(transcript(assistantMsg("探索完成")))
+    tc.consume(toolCompleted("c1", "subagent_run", "[子代理 s1] completed"))
+    expect(tc.isStreaming()).toBe(false)
+    const done = stripAnsi(tc.render(80).join("\n"))
+    expect(done).toContain("✓ subagent_run")
+    expect(done).toContain("探索完成")
+  })
+
+  it("信息弹窗:show/dismiss,任意键关闭,宽度一致", () => {    const d = new InfoDialog()
     expect(d.isActive()).toBe(false)
     d.show("斜杠命令", ["  /help 帮助", "  /abort 打断"], () => {})
     expect(d.isActive()).toBe(true)
