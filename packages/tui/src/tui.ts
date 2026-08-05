@@ -10,20 +10,16 @@ import {
   matchesKey,
 } from "@earendil-works/pi-tui"
 import type { CommandFace } from "@tau/surface"
-import type { Event, Sender, SessionSnapshot } from "@tau/contract"
+import type { Event, Sender } from "@tau/contract"
 import { editorTheme } from "./theme.ts"
 import { statusColor } from "./theme.ts"
 import { TranscriptView } from "./views/transcript.ts"
-import { ToolPanelView } from "./views/tool-panel.ts"
-import { ResourcePanelView, emptyResourceState } from "./views/resource-panel.ts"
 import { PermissionPopup, type PermissionDecision } from "./views/permission.ts"
 import { parseInput, formatHelp } from "./prompt.ts"
 
 export type TuiDeps = {
   face: CommandFace
   sender?: Sender
-  /** 初始快照(可选,从 session.snapshot() 拉取)。 */
-  snapshot?: SessionSnapshot
   /** 模型显示名(可选)。 */
   model?: string
   /** cwd 显示(可选)。 */
@@ -47,22 +43,16 @@ export function createTui(deps: TuiDeps): Tui {
   const ui = new PiTui(terminal)
 
   const transcript = new TranscriptView({ maxLines: 1000 })
-  const toolPanel = new ToolPanelView()
-  const resourcePanel = new ResourcePanelView()
   const permissionPopup = new PermissionPopup()
 
-  const resourceState = emptyResourceState()
-  if (deps.snapshot) {
-    resourceState.snapshot = deps.snapshot
-    resourceState.pendingCount = deps.snapshot.pendingSyscalls.length
-    resourceState.activeGoals = deps.snapshot.activeGoals.length
-  }
-  if (deps.model) resourceState.model = deps.model
-  if (deps.cwd) resourceState.cwd = deps.cwd
-  resourcePanel.update(resourceState)
-
   const editor = new Editor(ui, editorTheme, { paddingX: 1 })
-  const helpHint = new Text(statusColor.dim("  /help 查看命令 · Ctrl+C 打断/退出 · Enter 发送"), 0, 0)
+  const helpHint = new Text(statusColor.dim("  /help 查看命令 · Ctrl+C 打断/退出 · Enter 发送 · Ctrl+T 展开思考"), 0, 0)
+  // kimi-code 风格顶部状态:仅一行 Model + cwd(极简,不常驻预算/工具统计)
+  const modelLine = new Text(
+    statusColor.dim([deps.model ? `Model: ${deps.model}` : null, deps.cwd ? deps.cwd : null].filter(Boolean).join(" · ")),
+    0,
+    0,
+  )
 
   let stopped = false
   let resolveStop: () => void
@@ -88,18 +78,15 @@ export function createTui(deps: TuiDeps): Tui {
 
   function adjustLayout(): void {
     const rows = terminal.rows
-    const width = terminal.columns
-    // 固定区高度 = 资源面板(1) + 空行(3) + 工具面板(可变) + 编辑器(1) + 提示(1)。
-    // 工具面板行数随内容浮动,按当前宽度实测(物理行),避免其膨胀把 editor 顶出可视区。
-    const toolLines = toolPanel.render(width).length
-    const fixedOverhead = 1 + 3 + toolLines + 1 + 1
+    // 固定区 = 顶部状态行(1) + 空行(1) + 编辑器(1) + 提示(1)。
+    // transcript 占剩余;physical 行截断已由视图内部保证。
+    const fixedOverhead = 1 + 1 + 1 + 1
     transcript.setMaxRenderLines(Math.max(4, rows - fixedOverhead))
     ui.requestRender()
   }
 
   function handleEvent(event: Event): void {
     transcript.consume(event)
-    toolPanel.consume(event)
 
     switch (event.kind) {
       case "permission":
@@ -118,13 +105,6 @@ export function createTui(deps: TuiDeps): Tui {
         break
     }
 
-    const snap = face.snapshot()
-    resourcePanel.update({
-      snapshot: snap,
-      pendingCount: snap.pendingSyscalls.length,
-      activeGoals: snap.activeGoals.length,
-      busy: transcript.isStreaming() || toolPanel.hasActivity(),
-    })
     ensureSpinner()
     if (!transcript.isStreaming()) stopSpinner()
     adjustLayout()
@@ -185,11 +165,16 @@ export function createTui(deps: TuiDeps): Tui {
   }
 
   ui.addInputListener((data) => {
+    if (matchesKey(data, "ctrl+t")) {
+      transcript.toggleThinking()
+      ui.requestRender()
+      return { consume: true }
+    }
     if (matchesKey(data, "ctrl+c")) {
       if (permissionPopup.isActive()) {
         return { consume: true }
       }
-      if (toolPanel.hasActivity()) {
+      if (transcript.isStreaming()) {
         void face.publish({ kind: "abort", sender })
         return { consume: true }
       }
@@ -199,11 +184,9 @@ export function createTui(deps: TuiDeps): Tui {
     return undefined
   })
 
-  ui.addChild(resourcePanel)
-  ui.addChild(new Spacer(0))
+  ui.addChild(modelLine)
+  ui.addChild(new Spacer(1))
   ui.addChild(transcript)
-  ui.addChild(new Spacer(0))
-  ui.addChild(toolPanel)
   ui.addChild(new Spacer(0))
   ui.addChild(editor)
   ui.addChild(helpHint)

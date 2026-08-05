@@ -1,4 +1,5 @@
-// @tau/tui - views/tool-panel.ts:工具执行面板。
+// @tau/tui - views/tool-panel.ts:工具执行面板(独立组件;默认 TUI 布局已改为纯流式,
+// 工具事件内联进 transcript,本组件供外部/可插拔布局复用)。
 // 显示参数摘要(非全文,扫一眼即知模型在干嘛);活跃/最近完成的工具调用列表。
 // 事件驱动增量刷新:started -> completed/failed。
 

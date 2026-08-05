@@ -80,26 +80,29 @@ export class PermissionPopup implements Component, Focusable {
     if (this.request === null) return []
 
     const req = this.request
+    // box 总宽 = innerW + 4(左右各 1 边线 + 1 内边距);所有行严格同宽,防边框错位。
     const innerW = Math.min(width - 4, 72)
+    const boxW = innerW + 4
     const lines: string[] = []
 
-    const topBorder = statusColor.warn("┌" + "─".repeat(innerW) + "┐")
-    const botBorder = statusColor.warn("└" + "─".repeat(innerW) + "┘")
+    const topBorder = statusColor.warn("┌" + "─".repeat(boxW - 2) + "┐")
+    const botBorder = statusColor.warn("└" + "─".repeat(boxW - 2) + "┘")
     const sideBar = statusColor.warn("│")
 
     lines.push(topBorder)
-    lines.push(`${sideBar} ${chalk.yellow.bold("⚠ 权限请求")}${" ".repeat(Math.max(0, innerW - visibleWidth("⚠ 权限请求") - 1))} ${sideBar}`)
+    const titleText = "⚠ 权限请求"
+    lines.push(`${sideBar} ${chalk.yellow.bold(titleText)}${" ".repeat(Math.max(0, innerW - visibleWidth(titleText)))} ${sideBar}`)
 
     const toolLine = `工具: ${req.toolName}`
     lines.push(`${sideBar} ${truncateToWidth(toolLine, innerW)}${padTo(toolLine, innerW)} ${sideBar}`)
 
     const summaryLines = wrapText(req.summary, innerW - 2)
-    lines.push(`${sideBar}${" ".repeat(innerW + 2)}${sideBar}`)
+    lines.push(`${sideBar}${" ".repeat(boxW - 2)}${sideBar}`)
     for (const sl of summaryLines) {
       lines.push(`${sideBar} ${truncateToWidth(sl, innerW)}${padTo(sl, innerW)} ${sideBar}`)
     }
 
-    lines.push(`${sideBar}${" ".repeat(innerW + 2)}${sideBar}`)
+    lines.push(`${sideBar}${" ".repeat(boxW - 2)}${sideBar}`)
 
     const yesLabel = this.selected === 0 ? chalk.yellow.bold("[ Y 批准 ]") : statusColor.dim("[ Y 批准 ]")
     const noLabel = this.selected === 1 ? chalk.red.bold("[ N 拒绝 ]") : statusColor.dim("[ N 拒绝 ]")

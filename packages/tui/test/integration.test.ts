@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest"
 import { TranscriptView } from "../src/views/transcript.ts"
 import { ToolPanelView } from "../src/views/tool-panel.ts"
+import { PermissionPopup } from "../src/views/permission.ts"
 import type { Event, Message } from "@tau/contract"
 
 // ---------- 事件/消息构造器 ----------
@@ -480,4 +481,62 @@ describe("集成:Event 流驱动 transcript + tool-panel", () => {
     // 最近的内容应保留(末尾附近含第9条)
     expect(stripAnsi(lines.join("\n"))).toContain("第9条")
   })
+
+  it("thinking 折叠单行可展开:toggle 切换摘要/全文", () => {
+    const tc = new TranscriptView()
+    const thinkingText = "第一步先阅读文件结构\n第二步再定位问题根因\n第三步给出修复建议,这是一段很长的推理,用于验证多行展开。"
+    const msg = assistantMsg("", [{ id: "c1", name: "read", args: {} }])
+    const withThinking: Message = {
+      ...msg,
+      content: [{ type: "thinking", text: thinkingText }],
+      toolCalls: [],
+    }
+    tc.consume(transcript(withThinking))
+
+    // 默认折叠:预览前 2 行 + 折叠提示,不含第 3 段
+    const collapsed = tc.render(80)
+    expect(collapsed.length).toBe(3)
+    const collapsedText = stripAnsi(collapsed.join("\n"))
+    expect(collapsedText).toContain("第一步")
+    expect(collapsedText).toContain("第二步")
+    expect(collapsedText).toContain("展开")
+    expect(collapsedText).not.toContain("第三步")
+
+    // 展开:多行,含全文
+    tc.toggleThinking()
+    const expanded = tc.render(80)
+    expect(stripAnsi(expanded.join("\n"))).toContain("第三步")
+
+    // 再 toggle:全展开 → 收起
+    tc.toggleThinking()
+    const recollapsed = tc.render(80)
+    expect(stripAnsi(recollapsed.join("\n"))).not.toContain("第三步")
+  })
+
+  it("权限弹窗:所有行严格同宽(边框不错位)", () => {
+    const popup = new PermissionPopup()
+    const permissionEv = ev({
+      kind: "permission",
+      requestId: "req1",
+      toolName: "bash",
+      summary: "执行命令 ls -la,查看当前目录文件列表",
+      state: "requested",
+    })
+    popup.show(permissionEv, () => {})
+
+    const lines = popup.render(60)
+    expect(lines.length).toBeGreaterThan(3)
+    // 去 ANSI 后所有行可见宽度一致(边框与内容严格对齐)
+    const widths = lines.map((l) => visibleWidthOf(stripAnsi(l)))
+    const first = widths[0]!
+    for (const w of widths) {
+      expect(w).toBe(first)
+    }
+  })
 })
+
+function visibleWidthOf(s: string): number {
+  let n = 0
+  for (const ch of s) n += /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE6F\uFF00-\uFF60\uFFE0-\uFFE6]/.test(ch) ? 2 : 1
+  return n
+}
