@@ -55,7 +55,7 @@
 | `src/event.ts` | Event 封闭联合(id/redact/输入回执/告警类) |
 | `src/goal.ts` | Goal schema + 判定策略 |
 | `src/session.ts` | SessionSnapshot + pendingSyscalls + epoch |
-| `src/config.ts` | Config schema(纯 schema,零装载/合并逻辑) |
+| `src/config.ts` | Config schema(纯 schema,零装载/合并逻辑)——**(规划)** 未实现;当前 config 是 app 侧裸 kv(`tau config`) |
 | `src/invariant.ts` | 双视角不变量 + 预算检查器 + 重放一致性 |
 | `index.ts` | 汇总导出 |
 

@@ -26,9 +26,9 @@
 |---|---|
 | `src/face.ts` | CommandFace 聚合(发布/订阅/快照) |
 | `src/http.ts` | Hono HTTP + SSE 端点 |
-| `src/rpc.ts` | JSON-RPC over stdio/HTTP |
+| `src/rpc.ts` | JSON-RPC over stdio/HTTP——**(延后)** |
 | `src/acp.ts` | ACP 协议适配(editor 驱动) |
-| `src/events.ts` | 事件流(SSE 编码/续传/批处理) |
+| `src/events.ts` | 事件流(SSE 编码/续传/批处理)——实现在 `face.ts`(订阅 filter)与 `http.ts`(SSE 编码/续传/心跳) |
 
 ## 模块宪法要点
 - `http.ts`:SSE 事件批量 + 心跳;HTTP 错误统一 JSON 结构;续传参数(Last-Event-ID/`since=`)规范化

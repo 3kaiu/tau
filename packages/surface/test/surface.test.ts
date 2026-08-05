@@ -1,7 +1,7 @@
-// @tau/surface - 单测:HTTP/SSE + ACP 协议。
+// @tau/surface - 单测:HTTP/SSE + ACP 协议 + 订阅过滤。
 
 import { describe, expect, it, beforeEach } from "vitest"
-import { type CommandFace } from "../src/face.ts"
+import { type CommandFace, matchesFilter, PUBLIC_EVENT_KINDS } from "../src/face.ts"
 import { createHttpApp } from "../src/http.ts"
 import type { Command, Event, SessionSnapshot } from "@tau/contract"
 
@@ -43,6 +43,58 @@ function createMockFace(): CommandFace {
     }),
   }
 }
+
+describe("face: matchesFilter(observe 可见范围)", () => {
+  const toolEvent: Event = {
+    id: "t1",
+    kind: "tool",
+    timestamp: new Date().toISOString(),
+    toolCallId: "c1",
+    name: "bash",
+    state: "started",
+    args: { command: "sudo rm -rf /" },
+  }
+  const transcriptEvent: Event = {
+    id: "m1",
+    kind: "transcript",
+    timestamp: new Date().toISOString(),
+    message: {
+      id: "m1",
+      role: "assistant",
+      content: [{ type: "text", text: "hi" }],
+      createdAt: new Date().toISOString(),
+    },
+  }
+  const permissionEvent: Event = {
+    id: "p1",
+    kind: "permission",
+    timestamp: new Date().toISOString(),
+    requestId: "c1",
+    toolName: "bash",
+    summary: "run command",
+    state: "requested",
+  }
+
+  it("缺省 filter(public)隐藏工具明细,放行公开事件", () => {
+    expect(matchesFilter(toolEvent)).toBe(false)
+    expect(matchesFilter(transcriptEvent)).toBe(true)
+    expect(matchesFilter(permissionEvent)).toBe(true)
+  })
+
+  it("includeSensitive: true 放行工具明细", () => {
+    expect(matchesFilter(toolEvent, { includeSensitive: true })).toBe(true)
+  })
+
+  it("kinds 白名单过滤", () => {
+    const filter = { kinds: ["transcript"] as Event["kind"][] }
+    expect(matchesFilter(transcriptEvent, filter)).toBe(true)
+    expect(matchesFilter(permissionEvent, filter)).toBe(false)
+  })
+
+  it("permission 永远在 public 可见面(approve 落点依赖)", () => {
+    expect(PUBLIC_EVENT_KINDS).toContain("permission")
+  })
+})
 
 describe("HTTP: createHttpApp", () => {
   let face: CommandFace

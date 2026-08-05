@@ -174,7 +174,7 @@ function finishRuntime(prep: Prep, mcpEvents: readonly Event[]): TauRuntime {
   // 补发 MCP 注册事件
   for (const ev of mcpEvents) schedulerBridge(ev)
 
-  const face = createCommandFace({ orchestrate: scheduler, session })
+  const face = createCommandFace({ orchestrate: scheduler, session, action })
 
   return { store, session, llm: kernel, action, scheduler, face, enhancer, mcpDispose: async () => mcpRuntime.dispose?.() }
 }

@@ -61,3 +61,33 @@ Event 13 变体命名全对(event.ts:118-132);Command 8 变体均强制 sender;w
 
 - 审计中首次尝试将 check/test/eval 串行管道后台执行时挂起 15 分钟无输出;拆分独立执行后全部秒级通过。疑似管道 + 后台组合问题,非代码问题,未复现深究。
 - PLAN.md:149 已引用"audit8 修订"(权限双轨)但 docs/audit8.md 此前不存在;本文件补上该引用,并确认:SPEC 已按双轨修订,action 代码未跟上(P0-3)。
+
+## 收尾状态(audit8 后续补齐)
+
+本清单逐包补齐已完成一轮,基线:`bun run check` 零告警;`bun test` 全量 269 tests / 928 expect / 0 fail。逐项状态:
+
+- **P0-1 压缩交换** ✅:compact = 摘要进 retrieve 可回源(store 归档交换 + session.retrieve 合并归档)。
+- **P0-2 工具面 12→13** ✅:read/write/edit/bash/result/grep/find/ls/ask_user/system/tool:catalog/fetch/retrieve 全部注册。
+- **P0-3 权限双轨** ✅:requested/granted/denied/timeout 事件 + onPermission 回调 + requestId(toolCallId)定位 + 危险命令强制询问 + 负载拒绝补 tool failed。
+- **P0-4 goal 续跑** ✅:goal_continue 唤醒 + goalContinueMaxTurns(缺省 3,计入 maxTurns)+ goal 事件。
+- **P0-5 steer 队列** ✅:steer() 同时 bump steerEpoch/goalEpoch,running 中入队转尾部 drain,不再丢失。
+- **P0-6 contract 六 schema** ✅(除 Config schema 为 "规划" 标注):session 身份(id/title/parentId)、ApprovalState、DangerousCommandPatterns、Model.fallback 链字段、ToolResult.fileMeta 均已落地;config.ts 保持 "(规划)"。
+- **P0-7 llm 降级链** ✅:fallback.ts 降级链逻辑实现在 kernel.ts(fallbackChain + model_switched + cacheStats)。
+- **P0-8 Multi-run 名实相符** ✅:每模型独立子会话(持久化隔离)+ fused session 产物。
+- **P0-9 enhance policies.ts** ✅:codemode 解释器 + coder/explore/plan 子代理三件套。
+- **P0-10 ai@6 增量 part** ✅:stream.ts 锁定 tool-input-delta 命名(normalizeToolParts 已批改)。
+- **P1-15 store 双实现对齐** ✅:audit.query 双驱动排序取证一致 + messages.search 对齐 + withSlowQueryLog。
+- **P1-16 turnBudget 进投影 + wake.reason 产出** ✅:投影含 turnBudget;goal_continue 唤醒产生。
+- **P1-17 surface filter + observe** ✅:subscribe(filter) + matchesFilter + public 可见面;http SSE 支持 ?kinds / ?includeSensitive。
+- **P1-18 bash env 保留 + detach/进程树终止** ✅。
+- **P1-19 enhance 四项** ✅:llmSummarize 注入 + search + 插件降权执行 + remember overwrite。
+- **P1-20 llm** ✅(cacheStats + supportsThinking):cache 命中率经 cacheStats 面;索引按契约 thinking 语义。
+- **P1-21 orchestrate 恢复链** ⏳ 部分:lifecycle.ts "(规划)" 标注;recovery 事件在 session 崩溃恢复路径已产出,审计侧除(turnId,SPEC 已标注"部分实现")与副作用悬置判定未实现。
+- **P1-22 action API 形态** ✅ 口径修正:`permissionRequest()`/`grant(requestId)` 已在(权限双轨时落地);新增 `grantScope(caps, scope)` 作用域预授权(一次批准 N 次,maxUses/durationMs,危险命令不豁免,落审计);`Stream<ToolEvent>` 形态 SPEC 标注 "(规划)",流式感知经 onEvent 事件双轨。
+- **P2-23 模块表空壳** ✅:各 SPEC 模块表对不存在的文件已标 "(规划)" 或注明真实落点(compaction/artifacts/workspace/queues/subagent/lifecycle/rpc/events/loader/fallback/config)。
+- **P2-24 慢查询日志** ✅ 已达成(withSlowQueryLog)。
+- **P2-25 session.diff 易失性** ✅:SPEC 已声明(重启 → epoch-history-missing,消费方退化为快照拉取)。
+- **P2-26 llm providers 边界** ✅:SPEC 已声明当前 7 个供应商文件。
+
+剩余开放项仅 P1-21 / P1-22(API 形态重构,影响面大,留待独立迭代)。
+

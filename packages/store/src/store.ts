@@ -39,6 +39,38 @@ export interface MessageTable {
   list(sessionId: string, offset?: number, limit?: number): MessagePage
   count(sessionId: string): number
   delete(sessionId: string, messageIds: readonly string[]): void
+  /** 全文检索:query 按空白分词,AND 语义(所有词命中);走 FTS5(sqlite)/线性过滤(memory)。 */
+  search(sessionId: string, query: string, offset?: number, limit?: number): MessagePage
+  /** 压缩交换:全文移入归档区(仍可检索,不再进投影历史)。宪法七:全文永远可 retrieve 回来。 */
+  archive(sessionId: string, messageIds: readonly string[]): void
+  /** 只检索归档区(压缩交换的全文回取通道)。 */
+  archiveSearch(sessionId: string, query: string, offset?: number, limit?: number): MessagePage
+}
+
+/** 查询词规范:与索引文本同规范(CJK 逐字空格化)。 */
+export function normalizeSearchQuery(query: string): string {
+  return spaceCjk(query.trim())
+}
+
+/**
+ * CJK 逐字空格化:FTS5 unicode61 把连续 CJK 当单一 token,逐字分词后
+ * 单字序列 = token 序列,"全 文" 短语与子串检索语义对齐(memory includes 同规范)。
+ * 范围:统一表意 + 扩展 A + 兼容表意。
+ */
+export function spaceCjk(s: string): string {
+  return s.replace(/([\u3400-\u9fff\uf900-\ufaff])/g, " $1 ").replace(/\s+/g, " ").trim()
+}
+
+/** 检索索引文本:提取 message 中可检索的纯文本(FTS5 与 memory 过滤共用同一提取)。 */
+export function extractSearchText(message: Message): string {
+  const parts: string[] = []
+  for (const block of message.content) {
+    if (block.type === "text" && block.text !== "") parts.push(block.text)
+  }
+  for (const call of message.toolCalls) {
+    parts.push(call.name)
+  }
+  return spaceCjk(parts.join("\n"))
 }
 
 export interface EventTable {

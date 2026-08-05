@@ -8,6 +8,12 @@ import { loadSkills, catalogBlock, getSkillText } from "../src/skills.ts"
 import { remember, recall, forget } from "../src/memory.ts"
 import { ruleSummarize } from "../src/summarize.ts"
 import { createEnhancer } from "../src/enhancer.ts"
+import {
+  createTrustedPluginRegistry,
+  createPlugin,
+  interpretCodemode,
+  SUB_AGENT_POLICIES,
+} from "../src/index.ts"
 import { createMemoryStore } from "@tau/store"
 import { MessageSchema, type Message } from "@tau/contract"
 
@@ -118,6 +124,14 @@ describe("memory: remember/recall/forget", () => {
   it("不存在的 key 返回 null", () => {
     expect(recall(store, "s1", "nope")).toBeNull()
   })
+
+  it("overwrite 缺省 false:已存在 key 拒绝覆盖", () => {
+    expect(remember(store, "s1", "locked", "old")).toBe(true)
+    expect(remember(store, "s1", "locked", "new")).toBe(false)
+    expect(recall(store, "s1", "locked")?.content).toBe("old")
+    expect(remember(store, "s1", "locked", "new", { overwrite: true })).toBe(true)
+    expect(recall(store, "s1", "locked")?.content).toBe("new")
+  })
 })
 
 describe("summarize: ruleSummarize", () => {
@@ -145,6 +159,44 @@ describe("summarize: ruleSummarize", () => {
   it("空消息列表不崩溃", () => {
     const summary = ruleSummarize({ sessionId: "s1", messages: [], reason: "test" })
     expect(summary).toContain("压缩摘要")
+  })
+})
+
+describe("plugins: 信任分级与降权执行", () => {
+  const manifest = { name: "p1", version: "1.0.0", description: "测试插件" }
+
+  it("untrusted 插件的 skill/hook 带降权标记", () => {
+    const registry = createTrustedPluginRegistry()
+    const hook = () => {}
+    registry.install(
+      createPlugin(manifest, new Map([["secret", "malicious body"]]), new Map(), new Map([["h1", hook]])),
+      "untrusted",
+    )
+    const skill = registry.executeSkill("p1", "secret")
+    expect(skill?.content).toBe("malicious body")
+    expect(skill?.demoted).toBe(true)
+    const h = registry.executeHook("p1", "h1")
+    expect(h?.hook).toBe(hook)
+    expect(h?.demoted).toBe(true)
+  })
+
+  it("official 插件不降权", () => {
+    const registry = createTrustedPluginRegistry()
+    registry.install(createPlugin(manifest, new Map([["ok", "body"]])), "official")
+    expect(registry.executeSkill("p1", "ok")?.demoted).toBe(false)
+  })
+
+  it("未知插件返回 null", () => {
+    const registry = createTrustedPluginRegistry()
+    expect(registry.executeSkill("nope", "x")).toBeNull()
+  })
+
+  it("listByTrustLevel 按级别过滤", () => {
+    const registry = createTrustedPluginRegistry()
+    registry.install(createPlugin(manifest, new Map()), "official")
+    registry.install(createPlugin({ ...manifest, name: "p2" }, new Map()), "untrusted")
+    expect(registry.listByTrustLevel("official")).toHaveLength(1)
+    expect(registry.listByTrustLevel("verified")).toHaveLength(0)
   })
 })
 
@@ -183,13 +235,86 @@ describe("enhancer: createEnhancer 聚合", () => {
     expect(enhancer.getSkill("nonexistent")).toBeNull()
   })
 
-  it("summarize 产出摘要文本", () => {
+  it("summarize 产出摘要文本(LLM 未注入回退规则摘要)", async () => {
     const store = createMemoryStore()
     const enhancer = createEnhancer({ cwd: tmpDir, store })
     const messages = [msg("u1", "user", "test"), msg("a1", "assistant", "reply")]
-    const summary = enhancer.summarize("s1", messages, "budget")
+    const summary = await enhancer.summarize("s1", messages, "budget")
     expect(summary).toContain("压缩摘要")
     expect(summary).toContain("test")
+  })
+
+  it("注入 llmSummarize 时优先用注入回调,失败回退规则摘要", async () => {
+    const store = createMemoryStore()
+    const calls: string[] = []
+    const enhancer = createEnhancer({
+      cwd: tmpDir,
+      store,
+      llmSummarize: async (input) => {
+        calls.push(input.reason)
+        return `[LLM 摘要] ${input.messages.length} 条`
+      },
+    })
+    const messages = [msg("u1", "user", "test")]
+    const summary = await enhancer.summarize("s1", messages, "budget")
+    expect(summary).toBe("[LLM 摘要] 1 条")
+    expect(calls).toEqual(["budget"])
+  })
+
+  it("llmSummarize 抛错时回退规则摘要,不阻塞压缩", async () => {
+    const store = createMemoryStore()
+    const enhancer = createEnhancer({
+      cwd: tmpDir,
+      store,
+      llmSummarize: async () => {
+        throw new Error("llm down")
+      },
+    })
+    const messages = [msg("u1", "user", "test")]
+    const summary = await enhancer.summarize("s1", messages, "budget")
+    expect(summary).toContain("压缩摘要")
+  })
+
+  it("search 按名称/描述/触发词检索 skill", () => {
+    const store = createMemoryStore()
+    writeFileSync(
+      join(tmpDir, ".tau", "skills", "deploy.md"),
+      `---\nname: deploy\ndescription: 部署流程\ntriggers:\n  - release\n  - 发布\n---\nDeploy body.`,
+    )
+    writeFileSync(
+      join(tmpDir, ".tau", "skills", "cjk.md"),
+      `---\nname: cjk\ndescription: 中文分词实践\ntriggers:\n  - 中文\n---\nCJK body.`,
+    )
+    const enhancer = createEnhancer({ cwd: tmpDir, store })
+
+    expect(enhancer.search("deploy")).toEqual(["deploy"])
+    expect(enhancer.search("部署")).toEqual(["deploy"])
+    expect(enhancer.search("中文")).toEqual(["cjk"])
+    expect(enhancer.search("不存在")).toEqual([])
+  })
+
+  it("policies 暴露子代理三件套", () => {
+    const store = createMemoryStore()
+    const enhancer = createEnhancer({ cwd: tmpDir, store })
+    const catalog = enhancer.policies()
+    expect(catalog.names).toEqual(["coder", "explore", "plan"])
+    for (const p of SUB_AGENT_POLICIES) expect(catalog.entries.get(p.name)?.description).toBe(p.description)
+  })
+
+  it("codemode 解释器把意图映射到子代理", () => {
+    expect(interpretCodemode("帮我实现一个函数").agent.name).toBe("coder")
+    expect(interpretCodemode("调查一下这个崩溃").agent.name).toBe("explore")
+    expect(interpretCodemode("给出重构方案").agent.name).toBe("plan")
+  })
+
+  it("remember 经 enhancer 默认不覆盖,overwrite 可强制", () => {
+    const store = createMemoryStore()
+    const enhancer = createEnhancer({ cwd: tmpDir, store })
+    expect(enhancer.remember("s1", "k", "v1")).toBe(true)
+    expect(enhancer.remember("s1", "k", "v2")).toBe(false)
+    expect(enhancer.recall("s1", "k")?.content).toBe("v1")
+    expect(enhancer.remember("s1", "k", "v2", { overwrite: true })).toBe(true)
+    expect(enhancer.recall("s1", "k")?.content).toBe("v2")
   })
 
   it("记忆操作经 enhancer", () => {

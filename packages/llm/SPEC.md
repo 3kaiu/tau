@@ -29,12 +29,12 @@
 |---|---|
 | `src/kernel.ts` | LlmKernel 聚合(唯一入口) |
 | `src/stream.ts` | AI SDK 流 → LlmEvent 归一化 |
-| `src/providers/` | 每供应商一文件,子路径懒加载 |
+| `src/providers/` | 每供应商一文件,子路径懒加载——当前 7 个文件:alibaba/anthropic/deepseek/minimax/moonshotai/openai-compatible/zai |
 | `src/route.ts` | 模型 → 供应商路由 |
 | `src/cache.ts` | prompt cache 策略位(缓存命中率可观测) |
 | `src/endpoint.ts` | 端点解析:AI SDK baseURL / 系统 HTTP(S)_PROXY 透传 |
 | `src/auth.ts` | 凭据解析(env → 存储 → OAuth) |
-| `src/fallback.ts` | 降级链与熔断(阈值/状态/事件化) |
+| `src/fallback.ts` | 降级链与熔断(阈值/状态/事件化)——实现在 `kernel.ts`(fallbackChain + model_switched 事件,未单文件拆分) |
 | `src/catalog-remote.ts` | 远程目录(models.opencode.ai/api.json)映射与拉取 |
 
 ## 模块宪法要点

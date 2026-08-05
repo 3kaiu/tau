@@ -117,7 +117,9 @@ export type PluginWithTrust = {
 }
 
 /**
- * 带信任级别的插件注册表。
+ * 带信任级别的插件注册表(信任分级 + 降权执行)。
+ * 降权规则:untrusted 插件的 skill/hook 经 `executeSkill/executeHook` 输出降权标记
+ * (内容注入前可见性受限),由调用方决定是否放行——数据分级,不静默执行。
  */
 export type TrustedPluginRegistry = {
   install(plugin: Plugin, trustLevel: TrustLevel): void
@@ -125,6 +127,9 @@ export type TrustedPluginRegistry = {
   get(name: string): PluginWithTrust | undefined
   list(): PluginWithTrust[]
   listByTrustLevel(level: TrustLevel): PluginWithTrust[]
+  /** 降权执行入口:untrusted 插件内容带降权标记返回。 */
+  executeSkill(pluginName: string, skillName: string): { content: string; demoted: boolean } | null
+  executeHook(pluginName: string, hookName: string): { hook: Hook; demoted: boolean } | null
 }
 
 export function createTrustedPluginRegistry(): TrustedPluginRegistry {
@@ -153,6 +158,22 @@ export function createTrustedPluginRegistry(): TrustedPluginRegistry {
 
     listByTrustLevel(level: TrustLevel): PluginWithTrust[] {
       return Array.from(plugins.values()).filter((p) => p.trustLevel === level)
+    },
+
+    executeSkill(pluginName, skillName) {
+      const entry = plugins.get(pluginName)
+      if (entry === undefined) return null
+      const content = entry.plugin.skills.get(skillName)
+      if (content === undefined) return null
+      return { content, demoted: entry.trustLevel === "untrusted" }
+    },
+
+    executeHook(pluginName, hookName) {
+      const entry = plugins.get(pluginName)
+      if (entry === undefined) return null
+      const hook = entry.plugin.hooks.get(hookName)
+      if (hook === undefined) return null
+      return { hook, demoted: entry.trustLevel === "untrusted" }
     },
   }
 }

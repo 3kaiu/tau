@@ -4,3 +4,4 @@ dist/
 .tau/
 *.log
 .DS_Store
+.workbuddy/

@@ -1,7 +1,7 @@
 // @tau/surface - index.ts。face + print + http + acp。
 
-export { createCommandFace } from "./face.ts"
-export type { CommandFace, CommandResult, FaceDeps } from "./face.ts"
+export { createCommandFace, matchesFilter, PUBLIC_EVENT_KINDS } from "./face.ts"
+export type { CommandFace, CommandResult, EventFilter, FaceDeps } from "./face.ts"
 export { createPrintRenderer } from "./print.ts"
 export type { PrintStyle } from "./print.ts"
 export { createHttpApp, serveHttp } from "./http.ts"

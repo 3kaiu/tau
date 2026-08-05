@@ -1,12 +1,23 @@
 // @tau/action — tools/read.ts:read 工具。range{from,to}/preview 参数 + 行数报告;
 // 二进制/编码检测命中 → 拒绝(不吐乱码);大文件不整读。
 
-import { readFileSync } from "node:fs"
+import { readFileSync, statSync } from "node:fs"
+import { createHash } from "node:crypto"
 import { toolError, toolResult } from "@tau/contract"
-import type { ToolResult } from "@tau/contract"
+import type { FileMeta, ToolResult } from "@tau/contract"
 import { ToolErrorException, type ExecuteRequest } from "../runtime.ts"
 import { isBinary } from "../runtime.ts"
 import { PathBoundary } from "./common.ts"
+
+/** 文件元数据(陈旧判定/幂等依据):mtime+size 必带,hash 按需计算。 */
+export function fileMetaOf(path: string, withHash = false): FileMeta {
+  const st = statSync(path)
+  return {
+    mtime: st.mtime.toISOString(),
+    size: st.size,
+    ...(withHash ? { hash: createHash("sha1").update(readFileSync(path)).digest("hex").slice(0, 16) } : {}),
+  }
+}
 
 export function makeReadTool(boundary: PathBoundary, opts: { binaryToleranceBytes?: number } = {}) {
   const tolerance = opts.binaryToleranceBytes ?? 8192
@@ -40,12 +51,13 @@ export function makeReadTool(boundary: PathBoundary, opts: { binaryToleranceByte
       return toolResult({
         stdout: `总行数 ${totalLines}${lines[totalLines - 1]?.trim() === "" ? "(+1 空尾行)" : ""}\n--- 前 ${preview} 行 ---\n${head}${totalLines > preview ? `\n... 其余 ${totalLines - preview} 行省略(用 range 续读)` : ""}`,
         truncated: totalLines > preview,
+        fileMeta: fileMetaOf(path),
       })
     }
     const slice = lines.slice(Math.max(0, from - 1), to)
     const numbered = slice.map((line, i) => `${String(from + i).padStart(5)} | ${line}`).join("\n")
     const rangeNote = `--- ${pathIn} 行 ${from}-${Math.min(to, totalLines)}(共 ${totalLines}) ---`
-    return toolResult({ stdout: numbered === "" ? `${rangeNote}\n(空区间)` : `${rangeNote}\n${numbered}`, truncated: false })
+    return toolResult({ stdout: numbered === "" ? `${rangeNote}\n(空区间)` : `${rangeNote}\n${numbered}`, truncated: false, fileMeta: fileMetaOf(path) })
   }
 }
 

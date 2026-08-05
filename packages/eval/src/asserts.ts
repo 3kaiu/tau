@@ -248,7 +248,7 @@ const assert10: Assert = {
 const assert11: Assert = {
   id: 11,
   name: "命令级安全",
-  description: "危险模式命令强制询问(不静默执行)",
+  description: "危险模式命令强制询问(不静默执行);autoApprove=false 时挂起,deny 拒绝",
   async run() {
     const f = createFixture({
       script: {
@@ -259,7 +259,12 @@ const assert11: Assert = {
       },
       autoApprove: false,
     })
-    await runTurn(f, "跑命令")
+    const turn = runTurn(f, "跑命令")
+    // 双轨:无回调无非 autoApprove → 挂起等决议(permission(requested) 事件不静默执行)
+    for (let i = 0; i < 1000 && f.action.permissionRequest().length === 0; i++) await Bun.sleep(3)
+    if (f.action.permissionRequest().length === 0) throw new Error("bash 未挂起权限询问(autoApprove=false 且危险工具)")
+    f.action.deny("c1")
+    await turn
     const bashEvents = f.events.filter((e) => e.kind === "tool" && e.name === "bash")
     if (bashEvents.length === 0) throw new Error("缺 bash tool 事件")
     const failed = bashEvents.find((e) => e.kind === "tool" && e.state === "failed")
@@ -423,22 +428,38 @@ const assert15: Assert = {
 const assert16: Assert = {
   id: 16,
   name: "Multi-run",
-  description: "多模型并行执行,收集所有结果",
+  description: "多模型并行执行,子会话隔离 + 独立审计;fusion 产出新会话",
   async run() {
-    const { runMultiRun, selectBestRun } = await import("@tau/orchestrate")
+    const { runMultiRun, selectBestRun, createFusedSession } = await import("@tau/orchestrate")
     const f = createFixture({
       script: {
         replies: [textReply("result from model")],
       },
     })
     const result = await runMultiRun(
-      { llm: f.llm, session: f.session, action: f.action },
+      { llm: f.llm, session: f.session, store: f.store, action: f.action },
       { models: ["model-a", "model-b"], task: "test task", maxConcurrent: 2 },
     )
     if (result.runs.length !== 2) throw new Error(`期望 2 个 run,实际 ${result.runs.length}`)
     const best = selectBestRun(result.runs)
     if (best === null) throw new Error("selectBestRun 返回 null")
     if (!["model-a", "model-b"].includes(best.model)) throw new Error(`best model 不符: ${best.model}`)
+
+    // 子会话隔离:每个 run 独立 sessionId 且 parentId 指向祖先;主会话历史不被污染
+    const ids = new Set(result.runs.map((r) => r.sessionId))
+    if (ids.size !== 2) throw new Error(`子会话未隔离:${ids.size} 个独立 session`)
+    for (const r of result.runs) {
+      const child = f.store.sessions.get(r.sessionId)
+      if (child === undefined) throw new Error(`子会话 ${r.sessionId} 未落 store`)
+    }
+    if (f.session.project().history.length > 0) throw new Error("主会话历史被子 run 污染")
+
+    // fusion:汇总各 run 产出生成新会话(可继续对话)
+    const fused = createFusedSession({ store: f.store, session: f.session }, result.runs, { sessionId: "eval-fusion" })
+    const fusedProjection = fused.project()
+    if (!fusedProjection.self.session.parentId) throw new Error("fusion 会话缺 parentId")
+    fused.close()
+
     f.cleanup()
   },
 }

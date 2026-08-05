@@ -1,12 +1,13 @@
 // @tau/llm — kernel.ts:LlmKernel 聚合(唯一入口)。
-// 唯一职责:ContextProjection → LLM 流。一次 turn 一次 stream;错误事件化;模型切换可见。
+// 唯一职责:ContextProjection → LLM 流。一次 turn 一次 stream;错误事件化;模型切换可见;
+// 连续失败沿 Model.fallback 降级链下探(model_switched 事件逐级可见)。
 
 import { jsonSchema, streamText, tool, type LanguageModel, type ModelMessage, type ToolChoice, type ToolSet } from "ai"
 import type { ContextProjection, Message, Model, ModelCapabilities, SystemCall } from "@tau/contract"
-import { resolveApiKey } from "./auth.ts"
-import { promptCache, type CachePolicy } from "./cache.ts"
+import { resolveAuth } from "./auth.ts"
+import { promptCache, recordCacheHit, type CacheStats } from "./cache.ts"
 import { chatOptionsFor, routeProvider } from "./route.ts"
-import { collectStream, normalizeStream, type AiStreamPart, type LlmCollectResult, type LlmEvent } from "./stream.ts"
+import { collectStream, errorCodeOf, normalizeStream, type AiStreamPart, type LlmCollectResult, type LlmEvent, type LlmUsage } from "./stream.ts"
 
 export type LlmRequest = {
   /** 模型 id(缺省用投影 self.model.id)。 */
@@ -43,7 +44,9 @@ export interface LlmKernel {
   getModel(provider: string, id: string): Model | null
   features(model: Model): ModelCapabilities
   getAuth(model: Model): string | null
-  cachePolicy(model: Model): CachePolicy
+  cachePolicy(model: Model): ReturnType<typeof promptCache>
+  /** 命中率观测:finish 时累计(供 surface 呈现);读端零副作用。 */
+  cacheStats(): CacheStats
   /** 替换目录(动态目录接入点;不传则视为无操作)。id 冲突静态优先,远程补充新模型。 */
   refresh(catalog?: readonly Model[]): void
 }
@@ -51,6 +54,7 @@ export interface LlmKernel {
 export function createLlmKernel(options: LlmKernelOptions): LlmKernel {
   let catalog = [...options.catalog]
   let lastModelId: string | undefined
+  let cacheStats: CacheStats = { calls: 0, cachedTokenCandidates: 0, cacheReadTokens: 0 }
 
   const envKeys = { ...DEFAULT_ENV_KEYS, ...options.envKeys }
 
@@ -68,8 +72,8 @@ export function createLlmKernel(options: LlmKernelOptions): LlmKernel {
   }
 
   function getAuth(model: Model): string | null {
-    const explicit = options.getApiKey?.(model)
-    return resolveApiKey(explicit ?? null, model.provider.envKey, envKeys[model.provider.api] ?? "")
+    const { key } = resolveAuth(options.getApiKey?.(model) ?? null, model.provider.envKey, envKeys[model.provider.api] ?? "")
+    return key
   }
 
   function buildProvider(model: Model): LanguageModel | null {
@@ -80,20 +84,29 @@ export function createLlmKernel(options: LlmKernelOptions): LlmKernel {
     return factory(model, apiKey ?? "")
   }
 
-  async function* stream(
+  /** 降级链:请求模型 + Model.fallback 声明的备选(去重,按声明序)。 */
+  function fallbackChain(model: Model): Model[] {
+    const chain: Model[] = [model]
+    for (const id of model.fallback) {
+      const next = findModel(id)
+      if (next && !chain.some((m) => m.id === next.id)) chain.push(next)
+    }
+    return chain
+  }
+
+  function markUsage(usage: LlmUsage): void {
+    cacheStats = recordCacheHit(cacheStats, {
+      promptTokens: usage.promptTokens,
+      ...(usage.cacheReadTokens !== undefined ? { cacheReadTokens: usage.cacheReadTokens } : {}),
+    })
+  }
+
+  async function* runOnce(
+    model: Model,
     projection: ContextProjection,
-    req?: LlmRequest,
-    signal?: AbortSignal,
+    req: LlmRequest | undefined,
+    signal: AbortSignal | undefined,
   ): AsyncGenerator<LlmEvent> {
-    const model = resolveModel(req?.model ?? projection.self.model.id)
-    if (!model) {
-      yield { type: "error", code: "not_found", message: `模型 ${req?.model ?? projection.self.model.id} 不在目录`, retryable: false }
-      return
-    }
-    if (lastModelId !== undefined && lastModelId !== model.id) {
-      yield { type: "model-switched", from: lastModelId, to: model.id }
-    }
-    lastModelId = model.id
     const provider = buildProvider(model)
     if (!provider) {
       yield { type: "error", code: "permission_denied", message: `模型 ${model.id} 缺凭据`, retryable: false }
@@ -121,11 +134,53 @@ export function createLlmKernel(options: LlmKernelOptions): LlmKernel {
     try {
       result = await streamText(args)
     } catch (error) {
-      const event = normalizeError(error)
-      yield event
+      yield normalizeError(error)
       return
     }
     yield* normalizeStream(result.fullStream as AsyncIterable<AiStreamPart>, signal)
+  }
+
+  async function* stream(
+    projection: ContextProjection,
+    req?: LlmRequest,
+    signal?: AbortSignal,
+  ): AsyncGenerator<LlmEvent> {
+    const start = resolveModel(req?.model ?? projection.self.model.id)
+    if (!start) {
+      yield { type: "error", code: "not_found", message: `模型 ${req?.model ?? projection.self.model.id} 不在目录`, retryable: false }
+      return
+    }
+    const chain = fallbackChain(start)
+    if (lastModelId !== undefined && lastModelId !== chain[0]?.id) {
+      yield { type: "model-switched", from: lastModelId, to: chain[0]!.id }
+    }
+    lastModelId = chain[0]!.id
+    for (let i = 0; i < chain.length; i++) {
+      const model = chain[i]!
+      if (i > 0) {
+        yield { type: "model-switched", from: chain[i - 1]!.id, to: model.id }
+        lastModelId = model.id
+      }
+      let failed: Extract<LlmEvent, { type: "error" }> | null = null
+      for await (const event of runOnce(model, projection, req, signal)) {
+        if (event.type === "error") {
+          failed = event
+          break
+        }
+        if (event.type === "finish") {
+          markUsage(event.usage)
+          yield event
+          return
+        }
+        yield event
+      }
+      if (!failed) return
+      if (failed.code === "cancelled" || i === chain.length - 1) {
+        yield failed
+        return
+      }
+      // 连续失败 → 沿降级链下探(循环顶部发 model-switched)
+    }
   }
 
   return {
@@ -148,6 +203,7 @@ export function createLlmKernel(options: LlmKernelOptions): LlmKernel {
     features: (model) => model.capabilities,
     getAuth,
     cachePolicy: (model) => promptCache(model.provider.api),
+    cacheStats: () => ({ ...cacheStats }),
     refresh: (next) => {
       // 合并而非替换:id 冲突静态优先(会话当前模型不因远程缺失而失效),远程补充新模型
       if (next && next.length > 0) {
@@ -218,9 +274,10 @@ export function toToolSet(tools: readonly SystemCall[]): ToolSet {
   return out
 }
 
-/** 同步构造错误归一(streamText 构造期抛错不发流)。 */
+/** 同步构造错误归一(streamText 构造期抛错不发流)。与流中 error 共用错误码映射。 */
 function normalizeError(error: unknown): Extract<LlmEvent, { type: "error" }> {
   const anyError = error as { name?: string; message?: string }
   if (anyError?.name === "AbortError") return { type: "error", code: "cancelled", message: "已取消", retryable: false }
-  return { type: "error", code: "internal", message: anyError?.message ?? String(error), retryable: false }
+  const { code, retryable } = errorCodeOf(error)
+  return { type: "error", code, message: anyError?.message ?? String(error), retryable }
 }

@@ -232,3 +232,108 @@ export function makeMessage(partial: Partial<Message>): Message {
 
 export type { ActionPlane, LlmRequest, Session }
 export { toolResult }
+
+describe("orchestrate:goal_continue 续跑", () => {
+  it("Goal 未完成 → goal_continue 唤醒续跑(计入上限),完成后停止", async () => {
+    const nextReplies = ["第一步", "第二步", "第三步", "目标已完成"]
+    let calls = 0
+    const f = fresh(() => ({
+      text: nextReplies[calls++] ?? "完成",
+      thinking: "",
+      toolCalls: [],
+      usage: undefined,
+      finishReason: "stop" as const,
+      error: undefined,
+      aborted: false,
+    }))
+    f.scheduler.goals.set({
+      id: "g1",
+      text: "跑完流程",
+      status: "active",
+      progress: 0,
+      strategy: "explicit",
+      checklist: [],
+      createdAt: new Date().toISOString(),
+    })
+    const result = await f.scheduler.prompt({ text: "开始", source: "prompt" })
+    expect(result.error).toBeNull()
+
+    const snapshot = f.session.snapshot()
+    const goalSnap = snapshot.activeGoals.find((g) => g.id === "g1")
+    expect(goalSnap?.status).toBe("completed")
+  })
+
+  it("goal_continue 唤醒写入投影(wake.reason=goal_continue)", async () => {
+    const nextReplies = ["继续干活", "已完成"]
+    let calls = 0
+    const f = fresh(() => ({
+      text: nextReplies[calls++] ?? "完成",
+      thinking: "",
+      toolCalls: [],
+      usage: undefined,
+      finishReason: "stop" as const,
+      error: undefined,
+      aborted: false,
+    }))
+    f.scheduler.goals.set({
+      id: "g2",
+      text: "写文档",
+      status: "active",
+      progress: 0,
+      strategy: "explicit",
+      checklist: [],
+      createdAt: new Date().toISOString(),
+    })
+    await f.scheduler.prompt({ text: "开始", source: "prompt" })
+    const projection = f.session.project()
+    // 最近 admit 消息带 goal_continue 唤醒(至少有一次 goal_continue)
+    const continueWake = projection.history.filter((m) => m.source === "goal_continue" || m.wake === "goal_continue")
+    expect(continueWake.length).toBeGreaterThan(0)
+  })
+
+  it("maxTurns 预算:goal_continue 续跑受上限约束(超限即停)", async () => {
+    let calls = 0
+    const f = fresh(() => ({
+      text: `还在干活 ${calls++}`,
+      thinking: "",
+      toolCalls: [],
+      usage: undefined,
+      finishReason: "stop" as const,
+      error: undefined,
+      aborted: false,
+    }))
+    f.scheduler.goals.set({
+      id: "g3",
+      text: "永不完成",
+      status: "active",
+      progress: 0,
+      strategy: "explicit",
+      checklist: [],
+      createdAt: new Date().toISOString(),
+    })
+    const result = await f.scheduler.prompt({ text: "开始", source: "prompt" })
+    // 默认 goalContinueMaxTurns=3:首轮 + 3 次续跑 = 4 次 llm 调用
+    expect(calls).toBe(4)
+    expect(result.error).toBeNull()
+  })
+})
+
+describe("orchestrate:steer 队列不丢(audit8 P0-5)", () => {
+  it("running 时 steer 入队 → prompt 尾部消费,不静默丢失", async () => {
+    const texts: string[] = []
+    let calls = 0
+    const f = fresh(() => {
+      const text = calls === 0 ? "先干活" : "干完了"
+      calls++
+      return { text, thinking: "", toolCalls: [], usage: undefined, finishReason: "stop" as const, error: undefined, aborted: false }
+    })
+    const p = f.scheduler.prompt({ text: "开始", source: "prompt" })
+    const s = f.scheduler.steer({ text: "插话", source: "steer" })
+    await Promise.all([p, s])
+    const history = f.session.project().history
+    const steerAdmits = history.filter((m) => m.source === "steer" && m.role === "user")
+    expect(steerAdmits.length).toBe(1)
+    const texts2 = texts
+    void texts2
+  })
+})

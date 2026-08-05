@@ -13,7 +13,7 @@ LLM 的记忆。回答唯一问题:"LLM 现在该看到什么"。`project()` 是
 - `session.promote/steer/queue` 输入语义(由 orchestrate 调用)
 - `session.setGoal(goal)` — Goal 输入通道(orchestrate 判定结果经此写入,投影可见,依赖单向向下)
 - `session.pendSyscall(ask)` / `session.resolvePending(questionId)` — ask_user 挂起/恢复(模型在等你回答,UI/模型均可见)
-- `session.diff(fromEpoch, toEpoch)` — 投影差分(消费方增量渲染,免全量对比)
+- `session.diff(fromEpoch, toEpoch)` — 投影差分(消费方增量渲染,免全量对比)——**易失性**:差异基于进程内 epochHistory,重启后任意此后 epoch 缺失返回 `epoch-history-missing`;消费方须退化为全量 snapshot 拉取(SPEC 第 3 条快照权威兜底),不把 diff 当持久承诺
 - `session.recent()` — 最近活动块(重试/中断/模型切换/压缩告警/**recovery 告警**,进投影)——**一切自动行为进投影,无例外**
 - 崩溃恢复:重启后从 store 重放,不靠内存
 - `session.archive()` / `session.resume()` — 治理面入口:置 archived/active(发 lifecycle 事件,不删历史);注册表(store.sessions)随生命周期同步,resume 后状态与事件一致
@@ -36,10 +36,10 @@ LLM 的记忆。回答唯一问题:"LLM 现在该看到什么"。`project()` 是
 | `src/projector.ts` | 投影管线(唯一组装:system+history+tools+self+resources) |
 | `src/epoch.ts` | epoch 版本/上下文层级 |
 | `src/history.ts` | 历史窗口与摘要页管理 |
-| `src/compaction.ts` | 交换策略(触发条件/摘要生成委托 enhance) |
+| `src/compaction.ts` | 交换策略(触发条件/摘要生成委托 enhance)——**(规划)** 当前实现在 `history.ts`(compactionCandidates)+ `session.ts`(compact);未按单文件拆分 |
 | `src/retrieve.ts` | 分页检索实现 |
 | `src/snapshot.ts` | 快照权威(序列化/恢复) |
-| `src/artifacts.ts` | 大载荷存储(artifact 正文存 store,历史仅引用) |
+| `src/artifacts.ts` | 大载荷存储(artifact 正文存 store,历史仅引用)——**(规划)** 未实现;artifact 块当前随消息存 store,不单独建引用表 |
 
 ## 模块宪法要点
 - `projector.ts`:装配顺序固定(system → history → tools → self → resources),结果不可变;self 必含 clock/usage/cwd/permissions/skill 目录/session 身份,缺一即违宪;wake 与最近活动块必含(reason/重试/中断/切换)

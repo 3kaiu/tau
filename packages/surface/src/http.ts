@@ -4,7 +4,7 @@
 import { Hono } from "hono"
 import { streamSSE } from "hono/streaming"
 import type { Command, Event } from "@tau/contract"
-import type { CommandFace } from "./face.ts"
+import { matchesFilter, type CommandFace, type EventFilter } from "./face.ts"
 
 export type HttpDeps = {
   face: CommandFace
@@ -35,36 +35,47 @@ export function createHttpApp(deps: HttpDeps): Hono {
 
   app.get("/events", (c) => {
     const lastEventId = c.req.header("Last-Event-ID")
+    // subscribe 过滤器:?includeSensitive=1 放行工具明细;?kinds=a,b 白名单(缺省 public)
+    const includeSensitive = c.req.query("includeSensitive") === "1"
+    const kindsParam = c.req.query("kinds")
+    const filter: EventFilter = {
+      ...(kindsParam === undefined ? {} : { kinds: kindsParam.split(",") as Event["kind"][] }),
+      includeSensitive,
+    }
 
     return streamSSE(c, async (stream) => {
+      const emit = async (event: Event): Promise<void> => {
+        if (matchesFilter(event, filter)) await stream.writeSSE({ data: JSON.stringify(event), id: event.id })
+      }
+
       // Resume: 重放 missed events
       if (deps.replay !== undefined && lastEventId !== undefined) {
         const all = deps.replay()
         let found = false
         for (const event of all) {
           if (found) {
-            await stream.writeSSE({ data: JSON.stringify(event), id: event.id })
+            await emit(event)
           }
           if (event.id === lastEventId) found = true
         }
         // If lastEventId not found, send all (full sync)
         if (!found) {
           for (const event of all) {
-            await stream.writeSSE({ data: JSON.stringify(event), id: event.id })
+            await emit(event)
           }
         }
       } else if (deps.replay !== undefined) {
         // No resume: send all existing events
         for (const event of deps.replay()) {
-          await stream.writeSSE({ data: JSON.stringify(event), id: event.id })
+          await emit(event)
         }
       }
 
       // Subscribe to new events
       const abortController = new AbortController()
-      const unsubscribe = deps.face.subscribe((event: Event) => {
+      const unsubscribe = deps.face.subscribe(filter, (event: Event) => {
         if (abortController.signal.aborted) return
-        void stream.writeSSE({ data: JSON.stringify(event), id: event.id })
+        void emit(event)
       })
 
       // Heartbeat (every 30s)

@@ -11,10 +11,13 @@ export type MemoryEntry = {
   updatedAt: string
 }
 
-/** 写入/覆盖记忆。 */
-export function remember(store: Store, sessionId: string, key: string, content: string): void {
+/** 写入/覆盖记忆。overwrite 缺省 false:已存在 key 拒绝覆盖(返回 false),防模型误覆盖;overwrite: true 才允许。 */
+export function remember(store: Store, sessionId: string, key: string, content: string, opts: { overwrite?: boolean } = {}): boolean {
+  const existing = store.kv.get(`${MEM_PREFIX(sessionId)}${key}`)
+  if (existing !== null && opts.overwrite !== true) return false
   const entry: MemoryEntry = { key, content, updatedAt: new Date().toISOString() }
   store.kv.set(`${MEM_PREFIX(sessionId)}${key}`, JSON.stringify(entry))
+  return true
 }
 
 /** 读取记忆。 */

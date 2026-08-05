@@ -30,7 +30,15 @@ import {
   saveUsage,
   type UsageState,
 } from "./snapshot.ts"
-import { retrieveFrom, type Retrieved } from "./retrieve.ts"
+import { type Retrieved } from "./retrieve.ts"
+
+/** 消息纯文本(检索 excerpt 用)。 */
+function textOf(message: Message): string {
+  return message.content
+    .filter((block): block is Extract<typeof block, { type: "text" }> => block.type === "text")
+    .map((block) => block.text)
+    .join("\n")
+}
 
 export type SessionOptions = Partial<ProjectorOptions> & {
   sessionId: string
@@ -45,6 +53,8 @@ export function normalizeProjectorOptions(sessionId: string, options: Partial<Pr
   const cwd = options.cwd ?? process.cwd()
   return {
     sessionId,
+    ...(options.sessionTitle !== undefined ? { sessionTitle: options.sessionTitle } : {}),
+    ...(options.parentId !== undefined ? { parentId: options.parentId } : {}),
     maxContextTokens: options.maxContextTokens ?? 32_000,
     model: options.model ?? ModelSchema.parse({
       id: "default",
@@ -91,7 +101,7 @@ export interface Session {
   promote(text: string, source: string): Message
   steer(text: string, source: string): Message
   setGoal(goal: Goal): void
-  pendSyscall(ask: { toolCallId: string; toolName: string; summary: string }): PendingSyscall
+  pendSyscall(ask: { questionId?: string; toolCallId: string; toolName: string; summary: string }): PendingSyscall
   resolvePending(questionId: string, approved: boolean): void
   recordUsage(usage: { promptTokens: number; completionTokens: number; totalTokens: number; cacheReadTokens?: number }): void
   beginTurn(): void
@@ -275,9 +285,9 @@ export function createSession(options: SessionOptions): Session {
       touch()
     },
 
-    pendSyscall(ask: { toolCallId: string; toolName: string; summary: string }): PendingSyscall {
+    pendSyscall(ask: { questionId?: string; toolCallId: string; toolName: string; summary: string }): PendingSyscall {
       const syscall: PendingSyscall = {
-        questionId: uuid(),
+        questionId: ask.questionId ?? uuid(),
         toolCallId: ask.toolCallId,
         toolName: ask.toolName,
         raisedAt: clock().wall,
@@ -374,7 +384,8 @@ export function createSession(options: SessionOptions): Session {
         source: "compaction",
         createdAt: clock().wall,
       }
-      store.messages.delete(
+      // 压缩交换:全文移入归档区(仍可经 retrieve 检索回取),摘要进历史——宪法七不破坏
+      store.messages.archive(
         sessionId,
         drop.map((m) => m.id),
       )
@@ -394,8 +405,28 @@ export function createSession(options: SessionOptions): Session {
     },
 
     retrieve(optionsIn: { query: string; offset?: number; limit?: number }) {
-      const history = store.messages.list(sessionId).messages
-      return retrieveFrom(history, summaryIds, optionsIn)
+      // 活跃历史 + 归档区(压缩交换的全文回取)合并检索;命中标注来源
+      const live = store.messages.search(sessionId, optionsIn.query, 0, optionsIn.limit ?? Number.MAX_SAFE_INTEGER)
+      const archived = store.messages.archiveSearch(sessionId, optionsIn.query, 0, optionsIn.limit ?? Number.MAX_SAFE_INTEGER)
+      const liveResults: Retrieved[] = live.messages.map((m) => {
+        const excerpt = textOf(m)
+        return {
+          id: m.id,
+          source: summaryIds.includes(m.id) ? "summary" : "history",
+          message: m,
+          excerpt: excerpt.slice(0, 200),
+        }
+      })
+      const archivedResults: Retrieved[] = archived.messages.map((m) => ({
+        id: m.id,
+        source: "history",
+        message: m,
+        excerpt: textOf(m).slice(0, 200),
+      }))
+      const all = [...liveResults, ...archivedResults]
+      const offset = optionsIn.offset ?? 0
+      const limit = optionsIn.limit ?? all.length
+      return { results: all.slice(offset, offset + limit), total: all.length }
     },
 
     diff(fromEpoch: number, toEpoch: number): SessionDiff {

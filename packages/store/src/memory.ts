@@ -3,6 +3,7 @@
 
 import type { Event, Message, SessionSnapshot } from "@tau/contract"
 import type { AuditEntry, AuditQuery, AuditTable, EventTable, KvEntry, KvTable, MessagePage, MessageTable, SessionTable, Store } from "./store.ts"
+import { extractSearchText, normalizeSearchQuery } from "./store.ts"
 
 class MemorySessionTable implements SessionTable {
   readonly snapshots = new Map<string, SessionSnapshot>()
@@ -22,6 +23,7 @@ class MemorySessionTable implements SessionTable {
 
 class MemoryMessageTable implements MessageTable {
   readonly bySession = new Map<string, Message[]>()
+  readonly archivedBySession = new Map<string, Message[]>()
   append(sessionId: string, message: Message): void {
     const list = this.bySession.get(sessionId) ?? []
     list.push(message)
@@ -39,6 +41,34 @@ class MemoryMessageTable implements MessageTable {
     if (!list) return
     const drop = new Set(messageIds)
     this.bySession.set(sessionId, list.filter((m) => !drop.has(m.id)))
+  }
+  archive(sessionId: string, messageIds: readonly string[]): void {
+    if (messageIds.length === 0) return
+    const drop = new Set(messageIds)
+    const active = this.bySession.get(sessionId) ?? []
+    const moved = active.filter((m) => drop.has(m.id))
+    this.bySession.set(sessionId, active.filter((m) => !drop.has(m.id)))
+    this.archivedBySession.set(sessionId, [...(this.archivedBySession.get(sessionId) ?? []), ...moved])
+  }
+  search(sessionId: string, query: string, offset = 0, limit = Number.MAX_SAFE_INTEGER): MessagePage {
+    const tokens = normalizeSearchQuery(query).toLowerCase().split(/\s+/).filter((t) => t !== "")
+    if (tokens.length === 0) return { messages: [], total: 0, offset }
+    const list = this.bySession.get(sessionId) ?? []
+    const hits = list.filter((m) => {
+      const haystack = extractSearchText(m).toLowerCase()
+      return tokens.every((t) => haystack.includes(t))
+    })
+    return { messages: hits.slice(offset, offset + limit), total: hits.length, offset }
+  }
+  archiveSearch(sessionId: string, query: string, offset = 0, limit = Number.MAX_SAFE_INTEGER): MessagePage {
+    const tokens = normalizeSearchQuery(query).toLowerCase().split(/\s+/).filter((t) => t !== "")
+    if (tokens.length === 0) return { messages: [], total: 0, offset }
+    const list = this.archivedBySession.get(sessionId) ?? []
+    const hits = list.filter((m) => {
+      const haystack = extractSearchText(m).toLowerCase()
+      return tokens.every((t) => haystack.includes(t))
+    })
+    return { messages: hits.slice(offset, offset + limit), total: hits.length, offset }
   }
 }
 
@@ -63,11 +93,16 @@ class MemoryAuditTable implements AuditTable {
     this.entries.push(entry)
   }
   query(query: AuditQuery): readonly AuditEntry[] {
-    return this.entries.filter(
-      (e) =>
+    // 与 sqlite 逐项对齐:timestamp DESC, 插入序 DESC(最新在前;同 timestamp 后插入者在前)
+    return this.entries
+      .map((e, idx) => ({ e, idx }))
+      .filter(({ e }) =>
         (query.sessionId === undefined || e.sessionId === query.sessionId) &&
         (query.actor === undefined || e.actor === query.actor),
-    ).slice(-(query.limit ?? Number.MAX_SAFE_INTEGER))
+      )
+      .sort((a, b) => (a.e.timestamp === b.e.timestamp ? b.idx - a.idx : a.e.timestamp < b.e.timestamp ? 1 : -1))
+      .slice(0, query.limit ?? Number.MAX_SAFE_INTEGER)
+      .map(({ e }) => e)
   }
 }
 

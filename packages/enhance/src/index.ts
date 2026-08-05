@@ -12,6 +12,8 @@ export { remember, recall, forget } from "./memory.ts"
 export type { MemoryEntry } from "./memory.ts"
 export { ruleSummarize } from "./summarize.ts"
 export type { SummaryInput } from "./summarize.ts"
+export { policyCatalog, interpretCodemode, SUB_AGENT_POLICIES } from "./policies.ts"
+export type { PolicyCatalog, SubAgentPolicy, PolicyCapability } from "./policies.ts"
 export {
   createPluginRegistry,
   createTrustedPluginRegistry,

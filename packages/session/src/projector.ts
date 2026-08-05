@@ -23,6 +23,9 @@ import type { UsageState } from "./snapshot.ts"
 
 export type ProjectorOptions = {
   sessionId: string
+  /** 会话身份(契约 self.session):title 供 UI 标题,parentId 标识子会话来源。 */
+  sessionTitle?: string
+  parentId?: string
   model: Model
   cwd: string
   projectRoot?: string
@@ -83,7 +86,7 @@ export function project(input: ProjectorInput, opts: ProjectorOptions): ContextP
       ...(opts.git !== undefined ? { git: opts.git } : {}),
       permissions: [...opts.permissions],
       skills: { ...(opts.skills.dir !== undefined ? { dir: opts.skills.dir } : {}), names: [...opts.skills.names] },
-      session: { id: opts.sessionId },
+      session: { id: opts.sessionId, ...(opts.sessionTitle !== undefined ? { title: opts.sessionTitle } : {}), ...(opts.parentId !== undefined ? { parentId: opts.parentId } : {}) },
     },
     resources: {
       maxConcurrentTurns: opts.maxConcurrentTurns,
@@ -126,5 +129,9 @@ function assembleBlocks(opts: ProjectorOptions, input: ProjectorInput): SystemBl
       content: `当前目标[${goal.status} ${Math.round(goal.progress * 100)}%]:${goal.text}${goal.strategy === "checklist" ? `(checklist: ${goal.checklist.join("; ")})` : ""}`,
     })
   }
+  // 按 priority 降序装配;同 priority 后插入者在前(冲突以后置为准,契约注释语义)
   return blocks
+    .map((block, index) => ({ block, index }))
+    .sort((a, b) => (a.block.priority === b.block.priority ? b.index - a.index : b.block.priority - a.block.priority))
+    .map(({ block }) => block)
 }

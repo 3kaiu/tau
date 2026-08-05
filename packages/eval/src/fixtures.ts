@@ -81,7 +81,7 @@ export function createFixture(opts: FixtureOptions): Fixture {
     { ...opts.schedulerOptions, onEvent: collectEvent },
   )
 
-  const face = createCommandFace({ orchestrate: scheduler, session })
+  const face = createCommandFace({ orchestrate: scheduler, session, action })
 
   return {
     store,

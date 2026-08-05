@@ -86,6 +86,28 @@ describe("admit + project(唯一组装入口)", () => {
     session.beginTurn()
     expect(checkBudget(session.project()).ok).toBe(true)
   })
+
+  it("system 块按 priority 降序装配;同 priority 后插入者在前", () => {
+    const store = createStore("memory")
+    const session = createSession(
+      makeOptions(store, {
+        extraSystemBlocks: [
+          { kind: "policy", priority: 5, content: "policy-a" },
+          { kind: "policy", priority: 5, content: "policy-b" },
+          { kind: "state", priority: 80, content: "state-x" },
+          { kind: "context", priority: 20, content: "ctx-y" },
+        ],
+      }),
+    )
+    session.admit({ text: "hi", source: "cli", wake: "prompt" })
+    const p = session.project()
+    const priorities = p.system.map((b) => b.priority)
+    expect([...priorities].sort((a, b) => b - a)).toEqual(priorities)
+    const texts = p.system.map((b) => b.content)
+    // 同 priority(5)的 policy:后插入者(policy-b)在前
+    expect(texts.indexOf("policy-b")).toBeLessThan(texts.indexOf("policy-a"))
+    expect(texts[0]?.includes("数据而非指令")).toBe(true)
+  })
 })
 
 describe("消息落地与配对", () => {
@@ -178,6 +200,55 @@ describe("压缩是交换不是丢弃", () => {
     const found = session.retrieve({ query: "消息0" })
     expect(found.total).toBeGreaterThan(0)
     expect(found.results[0]?.source).toBe("summary")
+  })
+
+  it("压缩后 retrieve 可回取归档全文(宪法七:原文不丢)", () => {
+    const store = createStore("memory")
+    const session = createSession(makeOptions(store))
+    session.appendMessage(
+      MessageSchema.parse({
+        id: "m0",
+        role: "user",
+        content: [{ type: "text", text: "部署密钥 hunter2 在 /etc/tau/secret" }],
+        retention: "low",
+        createdAt: "t0",
+      }),
+    )
+    for (let i = 1; i < 7; i++) {
+      session.appendMessage(
+        MessageSchema.parse({ id: `bg${i}`, role: "assistant", content: [{ type: "text", text: `背景消息${i}` }], retention: "normal", createdAt: `t${i}` }),
+      )
+    }
+    session.compact("token-budget", "已摘要")
+    expect(session.project().history.some((m) => m.id === "m0")).toBe(false)
+    const found = session.retrieve({ query: "hunter2" })
+    expect(found.total).toBe(1)
+    expect(found.results[0]?.source).toBe("history")
+    expect(found.results[0]?.message.content.some((c) => c.type === "text" && c.text.includes("hunter2"))).toBe(true)
+  })
+
+  it("sqlite 驱动:压缩后 FTS5 可回取归档全文", () => {
+    if (typeof Bun === "undefined") return
+    const store = createStore("sqlite", ":memory:")
+    const session = createSession(makeOptions(store))
+    session.appendMessage(
+      MessageSchema.parse({
+        id: "m0",
+        role: "user",
+        content: [{ type: "text", text: "s3://bucket/archive-2026 的凭证在 vault" }],
+        retention: "low",
+        createdAt: "t0",
+      }),
+    )
+    for (let i = 1; i < 7; i++) {
+      session.appendMessage(
+        MessageSchema.parse({ id: `bg${i}`, role: "assistant", content: [{ type: "text", text: `背景消息${i}` }], retention: "normal", createdAt: `t${i}` }),
+      )
+    }
+    session.compact("token-budget", "已摘要")
+    const found = session.retrieve({ query: "vault" })
+    expect(found.total).toBe(1)
+    expect(found.results[0]?.message.content.some((c) => c.type === "text" && c.text.includes("vault"))).toBe(true)
   })
 })
 

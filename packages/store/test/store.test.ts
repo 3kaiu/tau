@@ -107,6 +107,75 @@ describe("store: sessions.list 会话注册表(updatedAt 倒序,双驱动对齐)
   })
 })
 
+describe("store: messages.search 全文检索(双驱动对齐,AND 语义)", () => {
+  forDrivers((store) => {
+    const m1 = MessageSchema.parse({ id: "m1", role: "user", content: [{ type: "text", text: "什么是 FTS5 全文索引" }], createdAt: "t" })
+    const m2 = MessageSchema.parse({ id: "m2", role: "assistant", content: [{ type: "text", text: "SQLite 的全文索引用于检索" }], createdAt: "t" })
+    const m3 = MessageSchema.parse({ id: "m3", role: "assistant", content: [{ type: "text", text: "无关话题" }], createdAt: "t" })
+    const m4 = MessageSchema.parse({ id: "m4", role: "assistant", toolCalls: [{ id: "c1", name: "bash", arguments: {} }], content: [], createdAt: "t" })
+    store.messages.append("s1", m1)
+    store.messages.append("s1", m2)
+    store.messages.append("s1", m3)
+    store.messages.append("s1", m4)
+    expect(store.messages.search("s1", "全文").messages.map((m) => m.id)).toEqual(["m1", "m2"])
+    expect(store.messages.search("s1", "全文 检索").messages.map((m) => m.id)).toEqual(["m2"])
+    expect(store.messages.search("s1", "bash").messages.map((m) => m.id)).toEqual(["m4"])
+    expect(store.messages.search("s1", "不存在词").messages).toHaveLength(0)
+    const page = store.messages.search("s1", "全文", 1, 1)
+    expect(page.messages.map((m) => m.id)).toEqual(["m2"])
+    expect(page.total).toBe(2)
+    // 删除后索引同步
+    store.messages.delete("s1", ["m2"])
+    expect(store.messages.search("s1", "全文").messages.map((m) => m.id)).toEqual(["m1"])
+    // 会话隔离
+    expect(store.messages.search("s2", "全文").messages).toHaveLength(0)
+  })
+})
+
+describe("store: audit.query 排序对齐(timestamp DESC,最新在前)", () => {
+  forDrivers((store) => {
+    store.audit.append({ id: "a1", sessionId: "s1", timestamp: "2026-01-01T00:00:00Z", actor: "model", action: "bash:ok", detail: "ls" })
+    store.audit.append({ id: "a2", sessionId: "s1", timestamp: "2026-03-01T00:00:00Z", actor: "model", action: "bash:ok", detail: "pwd" })
+    store.audit.append({ id: "a3", sessionId: "s1", timestamp: "2026-02-01T00:00:00Z", actor: "cli", action: "prompt:ok", detail: "hi" })
+    // 乱序插入也要按 timestamp DESC
+    expect(store.audit.query({ sessionId: "s1" }).map((a) => a.id)).toEqual(["a2", "a3", "a1"])
+    expect(store.audit.query({ sessionId: "s1", limit: 2 }).map((a) => a.id)).toEqual(["a2", "a3"])
+  })
+})
+
+describe("store: sqlite 慢查询日志按阈值输出", () => {
+  it("超阈值的语句触发 logger,不超阈值不触发", () => {
+    if (!isBun) return
+    const logs: { sql: string; ms: number }[] = []
+    const store = new SqliteStore(":memory:", {
+      slowQueryThresholdMs: 0,
+      slowQueryLogger: (sql, ms) => logs.push({ sql, ms }),
+    })
+    store.kv.set("k", "v")
+    expect(logs.length).toBeGreaterThan(0)
+    expect(logs[0]?.sql).toContain("kv")
+    // 无阈值选项时默认不包
+    const plain = new SqliteStore(":memory:")
+    expect(() => plain.kv.set("k2", "v2")).not.toThrow()
+    plain.close?.()
+  })
+
+  it("搜索在持久化文件上可用(迁移 v3)", () => {
+    if (!isBun) return
+    const tmp = `/tmp/tau-fts-${Date.now()}.sqlite`
+    {
+      const store = new SqliteStore(tmp)
+      store.messages.append("s1", MessageSchema.parse({ id: "m1", role: "user", content: [{ type: "text", text: "第一轮对话" }], createdAt: "t" }))
+      store.close?.()
+    }
+    {
+      const store = new SqliteStore(tmp)
+      expect(store.messages.search("s1", "第一轮").messages.map((m) => m.id)).toEqual(["m1"])
+      store.close?.()
+    }
+  })
+})
+
 describe("store: kv.list 前缀枚举(双驱动对齐)", () => {
   forDrivers((store) => {
     store.kv.set("config:model", "gpt-5-mini")

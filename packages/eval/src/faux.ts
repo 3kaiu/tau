@@ -69,6 +69,7 @@ export function createFauxLlm(script: FauxScript): LlmKernel {
   }
 
   return {
+    cacheStats: () => ({ calls: 0, cachedTokenCandidates: 0, cacheReadTokens: 0 }),
     async* stream(projection: ContextProjection, req?: LlmRequest, signal?: AbortSignal): AsyncGenerator<LlmEvent> {
       void projection
       void req

@@ -7,7 +7,8 @@ import type { SystemBlock } from "@tau/contract"
 import type { Store } from "@tau/store"
 import { loadSkills, catalogBlock, getSkillText, type SkillCatalog } from "./skills.ts"
 import { remember, recall, forget, type MemoryEntry } from "./memory.ts"
-import { ruleSummarize } from "./summarize.ts"
+import { ruleSummarize, type SummaryInput } from "./summarize.ts"
+import { policyCatalog } from "./policies.ts"
 import type { Message } from "@tau/contract"
 
 export type EnhancerOptions = {
@@ -17,6 +18,8 @@ export type EnhancerOptions = {
   skillsDir?: string
   /** AGENTS.md 路径(缺省 {cwd}/AGENTS.md)。 */
   agentsMdPath?: string
+  /** LLM 摘要 policy 注入(app 拼装点注入带 llm 访问的实现;enhance 不 import llm)。 */
+  llmSummarize?: (input: SummaryInput) => string | Promise<string>
 }
 
 export type EnhancerState = {
@@ -33,15 +36,20 @@ export interface Enhancer {
   getSkill(name: string): string | null
   /** skill 目录。 */
   catalog(): SkillCatalog
-  /** 记忆 syscall 后端。 */
-  remember(sessionId: string, key: string, content: string): void
+  /** skill 检索(名称/描述/触发词索引)。 */
+  search(query: string): string[]
+  /** 记忆 syscall 后端(overwrite 缺省 false,防误覆盖)。 */
+  remember(sessionId: string, key: string, content: string, opts?: { overwrite?: boolean }): boolean
   recall(sessionId: string, key: string): MemoryEntry | null
   forget(sessionId: string, key: string): void
-  /** 摘要策略(session.compact 的摘要源)。 */
-  summarize(sessionId: string, messages: readonly Message[], reason: string): string
+  /** 摘要策略(session.compact 的摘要源):注入的 llmSummarize 优先,失败/未注入回退规则摘要。 */
+  summarize(sessionId: string, messages: readonly Message[], reason: string): Promise<string>
+  /** 策略目录(codemode 解释器 + 子代理三件套)。 */
+  policies(): ReturnType<typeof policyCatalog>
 }
 
 export function createEnhancer(opts: EnhancerOptions): Enhancer {
+  const options = opts
   const skillsDir = opts.skillsDir ?? join(opts.cwd, ".tau", "skills")
   const agentsMdPath = opts.agentsMdPath ?? join(opts.cwd, "AGENTS.md")
 
@@ -100,20 +108,46 @@ export function createEnhancer(opts: EnhancerOptions): Enhancer {
       return state.skills
     },
 
-    remember(sessionId: string, key: string, content: string): void {
-      remember(opts.store, sessionId, key, content)
+    remember(sessionId: string, key: string, content: string, ropts?: { overwrite?: boolean }): boolean {
+      return remember(options.store, sessionId, key, content, ropts)
     },
 
     recall(sessionId: string, key: string): MemoryEntry | null {
-      return recall(opts.store, sessionId, key)
+      return recall(options.store, sessionId, key)
     },
 
     forget(sessionId: string, key: string): void {
-      forget(opts.store, sessionId, key)
+      forget(options.store, sessionId, key)
     },
 
-    summarize(sessionId: string, messages: readonly Message[], reason: string): string {
-      return ruleSummarize({ sessionId, messages, reason })
+    async summarize(sessionId: string, messages: readonly Message[], reason: string): Promise<string> {
+      const input: SummaryInput = { sessionId, messages, reason }
+      if (options.llmSummarize !== undefined) {
+        try {
+          return await options.llmSummarize(input)
+        } catch {
+          // 摘要不阻塞压缩:LLM 失败回退规则摘要
+        }
+      }
+      return ruleSummarize(input)
+    },
+
+    search(query: string): string[] {
+      const q = query.trim().toLowerCase()
+      if (q === "") return []
+      const hits: Array<{ name: string; score: number }> = []
+      for (const entry of state.skills.entries.values()) {
+        const haystack = [entry.name, entry.description, ...entry.triggers].join(" ").toLowerCase()
+        let score = 0
+        if (entry.name.toLowerCase().includes(q)) score += 3
+        else if (haystack.includes(q)) score += 1
+        if (score > 0) hits.push({ name: entry.name, score })
+      }
+      return hits.sort((a, b) => b.score - a.score).map((h) => h.name)
+    },
+
+    policies() {
+      return policyCatalog()
     },
   }
 }

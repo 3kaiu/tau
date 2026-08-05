@@ -27,7 +27,7 @@
 | 模块 | 职责 |
 |---|---|
 | `src/enhancer.ts` | Enhancer 聚合(装载/应用/查询) |
-| `src/loader.ts` | 声明式资源装载(mtime/hash 增量 + 缓存) |
+| `src/loader.ts` | 声明式资源装载(mtime/hash 增量 + 缓存)——**(规划)** 当前装载在 `enhancer.ts`(构造期自动装载一次,无 mtime/hash 缓存) |
 | `src/skills.ts` | skill 注册表与触发匹配 |
 | `src/memory.ts` | 记忆读写(syscall 后端) |
 | `src/policies.ts` | 策略集(codemode 解释器 + 子代理三件套) |

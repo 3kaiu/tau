@@ -33,13 +33,15 @@ export type SchedulerOptions = {
   onEvent?: (event: Event) => void
   /** Goal 判定配置:每 turn 后校验目标,未完成继续。 */
   goalJudge?: GoalJudge
+  /** Goal 续跑轮数上限(goal_continue 唤醒不豁免预算,超限即停发 budget_exceeded)。 */
+  goalContinueMaxTurns?: number
   /** 上下文压缩:超预算时自动压缩历史(缺省不压缩)。 */
   compact?: CompactStrategy
 }
 
 export type SchedulerInput = {
   text: string
-  source?: "prompt" | "steer"
+  source?: "prompt" | "steer" | "goal_continue"
 }
 
 export type TurnResult = {
@@ -82,6 +84,7 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
   const maxRetries = options.maxRetries ?? 2
   const loopGuard = options.loopGuard ?? 3
   const goalJudge = options.goalJudge ?? new GoalJudge()
+  const goalContinueMaxTurns = options.goalContinueMaxTurns ?? 3
 
   const listeners = new Set<(event: Event) => void>()
   const fingerprints = new Map<string, number>()
@@ -89,6 +92,7 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
   let running: Promise<unknown> | null = null
   let steerQueue: SchedulerInput[] = []
   let steerEpoch = 0
+  let goalEpoch = 0
 
   function emit(event: Event): void {
     for (const fn of listeners) fn(event)
@@ -107,7 +111,7 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
   async function runTurn(input: SchedulerInput): Promise<TurnResult> {
     steerEpoch++
     const myEpoch = steerEpoch
-    const wakeReason: "steer" | "prompt" = input.source === "steer" ? "steer" : "prompt"
+    const wakeReason = input.source === "steer" ? "steer" : input.source === "goal_continue" ? "goal_continue" : "prompt"
     session.admit({ text: input.text, source: input.source ?? "prompt", wake: wakeReason })
     abortController = new AbortController()
     const signal = abortController.signal
@@ -187,7 +191,9 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
           break
         }
         const outcome = await action.execute(
-          { sessionId: session.sessionId, toolCallId: call.id, name: call.name, args: call.args as Record<string, unknown>, cwd: session.project().self.cwd },
+          { sessionId: session.sessionId, toolCallId: call.id, name: call.name, args: call.args as Record<string, unknown>, cwd: session.project().self.cwd,
+            // ask_user 挂起登记:pendingSyscalls 可见性由 session 承载(questionId 以 action 为准)
+            onPending: (ask) => session.pendSyscall({ questionId: ask.questionId, toolCallId: ask.questionId, toolName: ask.toolName, summary: ask.summary }) },
           { timeoutMs: maxTurnMs },
         )
         if (outcome.ok) {
@@ -295,9 +301,42 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
     sessionIn.compact("context-overflow", summaryText)
   }
 
+  /** Goal 续跑:目标未完成 → goal_continue 唤醒新一轮 turn(计入 goalContinueMaxTurns,超限预算止)。 */
+  async function promptWithGoalContinue(input: SchedulerInput): Promise<TurnResult> {
+    let result = await runTurn(input)
+    const baseGoalEpoch = goalEpoch
+    for (let gi = 0; gi < goalContinueMaxTurns; gi++) {
+      if (result.aborted || goalEpoch !== baseGoalEpoch) break
+      const activeGoal = session.snapshot().activeGoals.find((g) => g.status === "active")
+      if (activeGoal === undefined) break
+      const judgeResult = await goalJudge.judge(activeGoal, session)
+      goalJudge.updateGoal(session, activeGoal, judgeResult)
+      if (judgeResult.status === "completed") {
+        emitRaw({ kind: "goal", goalId: activeGoal.id, status: "completed", progress: 1.0, reason: judgeResult.reason })
+        break
+      }
+      if (judgeResult.status === "blocked") {
+        emitRaw({ kind: "goal", goalId: activeGoal.id, status: "blocked", progress: judgeResult.progress, reason: judgeResult.reason })
+        break
+      }
+      emitRaw({ kind: "goal", goalId: activeGoal.id, status: "progress", progress: judgeResult.progress, reason: `未完成,继续执行(${gi + 1}/${goalContinueMaxTurns})` })
+      result = await runTurn({ text: `继续执行目标:${activeGoal.text}`, source: "goal_continue" })
+    }
+    return result
+  }
+
   return {
     async prompt(input) {
-      const job = (async () => runTurn(input))()
+      const job = (async () => {
+        const result = await promptWithGoalContinue(input)
+        // drain steer 队列:忙时入队的 steer 在此消费(runTurn 内 epoch 检查已中断主循环)
+        while (steerQueue.length > 0) {
+          const next = steerQueue.shift()
+          if (next === undefined) break
+          await promptWithGoalContinue(next)
+        }
+        return result
+      })()
       running = job
       try {
         return await job
@@ -306,6 +345,8 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
       }
     },
     async steer(input) {
+      goalEpoch++
+      steerEpoch++
       steerQueue.push({ ...input, source: "steer" })
       if (running === null) {
         const next = steerQueue.shift()
