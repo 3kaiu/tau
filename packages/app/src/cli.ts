@@ -17,7 +17,7 @@ import {
   upsertSchedule,
   type ScheduleEntry,
 } from "@tau/orchestrate"
-import { CommandSchema, EventSchema, goal as makeGoal, type Message, type SessionSnapshot } from "@tau/contract"
+import { CommandSchema, ConfigSchema, EventSchema, coerceConfigValue, formatConfigError, goal as makeGoal, isConfigKey, type Message, type SessionSnapshot } from "@tau/contract"
 import { version } from "./index.ts"
 
 const HELP = `tau ${version} - agent 运行时
@@ -636,6 +636,17 @@ function configMode(args: string[]): number {
         console.error(`tau config:拒绝明文落盘凭据 "${key}"`)
         console.error(`  改用环境变量:export TAU_<PROVIDER>_API_KEY=...(doctor 会检测)`)
         return 2
+      }
+      // 配置即契约:Config schema 已知键在落盘前强转 + 校验,非法给可操作报错
+      if (isConfigKey(key)) {
+        const coerced = coerceConfigValue(key, value)
+        const picked = ConfigSchema.pick({ [key]: true } as never)
+        const check = picked.safeParse({ [key]: coerced })
+        if (!check.success) {
+          console.error(`tau config:非法配置 "${key}" = ${value}`)
+          console.error(formatConfigError(check.error, { [key]: value }))
+          return 2
+        }
       }
       store.kv.set(CONFIG_PREFIX + key, value)
       console.log(`tau config:${key} = ${value} (${path})`)

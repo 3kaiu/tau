@@ -14,11 +14,13 @@
 - `tau sessions list|show|resume|archive|delete` - 会话治理(M9 支柱 C;delete = archive,不物理删;需 `--store` 才有持久记录)
 - `tau config list|get <k>|set <k> <v>|unset <k>` - 配置读写(落 store.kv,拒明文 secrets)
 - MCP:`TAU_MCP_SERVERS` JSON 声明 server 列表(stdio command/args 或 http url+headers,id 为工具名前缀);工具注册为 `mcp_<id>_<tool>` syscall,经 action.execute 审批/审计/截断(不绕行);每 server 可配 defaultRule(pattern 需通配,如 `mcp_demo_*`,装载进能力门,缺省 ask);注册先于 session 创建(投影 tools 快照含 MCP 工具)→ 生产走 composeAsync;进程退出前 `runtime.mcpDispose()` 关闭 client(stdio 子进程句柄不释放会阻塞退出)
+- 记忆 syscall 面(M11):`memory:write/read/search/list/forget` 五个 T0 工具(缺省 allow,经 action.execute 审计;write 缺省拒绝覆盖已有 key,`overwrite: true` 放行);后端 = enhance 记忆(store.kv 持久,可跨会话续用);assemble 调 `enhancer.apply(sessionId)` 生成记忆索引块(两级装载快照)
+- 子代理委派(M12):`subagent:run` syscall(T0 危险工具,缺省 ask;task 必填,context/tools/background/maxTurns 可选);executor 闭包 kernel/session/store/action 经 orchestrate `runSubagent` 派生子会话(能力面白名单递减缺省只读、独立工作树、结果截断回传);元数据在 prepare 注册(投影可见),executor 在 finishRuntime 就绪后覆盖
 - 上下文压缩:compose 把 enhance.summarize 注入 scheduler 的 compact 策略(历史超预算自动摘要化,用户输入永不丢)
 - `tau schedule list|add <cron> <目标>|rm <id>|run [--dry-run]` - 定时目标(orchestrate cron 治理面;`run` 是一次性检查,由系统 cron 每分钟拉起,tau 不常驻守护进程)
 - `tau eval` - 运行行为评测(委托 eval 包)
 - `tau --version` / `-V` - 版本号(单二进制自证)
-- 配置:`tau config` 命令经 store.kv 读写(全局库 `~/.tau/config.sqlite`,可用 `--store` 改指项目库);契约 Config schema 的装载/合并/消费方(预算/tier 规则读取)标注规划中,随 M9 配置热更新定案
+- 配置:`tau config` 命令经 store.kv 读写(全局库 `~/.tau/config.sqlite`,可用 `--store` 改指项目库);契约 Config schema 的装载/合并/消费方已落地:`tau config set` 对已知键强转 + 校验(非法退出 2 且不落盘);compose 经 `configStore`/`config` 装载合并(store.kv 基线 + 程序化覆写,options.config 优先),`maxContextTokens` 与 `toolTierRules` 透传 createSession(预算 + tier 注入裁剪);CLI 交互面自动装载消费随 M9 配置热更新定案
 - 持久化:`--store <path>` 指定 SQLite 文件;缺省内存(重启丢失)。compose 支持 `storePath` 选项
 - 分发:`bun run build` 产出 `dist/tau`(当前平台);`bun run build:all [目标过滤]` 交叉编译 darwin/linux(x64+arm64)与 windows-x64
 
@@ -35,13 +37,14 @@
 | `src/main.ts` | 入口(Bun compile 目标) |
 | `src/cli.ts` | 参数解析 + 子命令路由 + doctor/观测/治理/配置/调度子命令 |
 | `src/compose.ts` | 依赖拼装(唯一) |
+| `src/config.ts` | 配置装载:store.kv(config:* 前缀)→ ConfigSchema(不分语义决策) |
 | `src/mcp.ts` | MCP server 注册(surface 层 syscall 化;工具名转义 + defaultRule 注入 + callTool 适配) |
 | `scripts/build.ts` | 交叉编译单二进制(仓库根,非包内) |
 
-> 配置与 doctor 未单列模块:两者各百余行且只被 CLI 调用,拆包只会多一层间接。契约 Config schema 的装载/合并落地时再抽 `src/config.ts`。
+> 配置与 doctor 未单列模块:两者各百余行且只被 CLI 调用,拆包只会多一层间接;配置装载已按此约定抽 `src/config.ts`(M10.4)。
 
 ## 模块宪法要点
-- `compose.ts`:依赖图只在此声明,其他包禁止互相 new
+- `compose.ts`:依赖图只在此声明,其他包禁止互相 new;内联 syscall(记忆面/技能/子代理)经 `registerSyscall` 统一注册——**声明 defaultRule 必进能力门**(schema 声明与运行时授权不漂移,危险工具无规则不静默 deny)
 - `cli.ts`:解析失败输出统一格式(exit code 2 + 一行原因);**观测命令严格只读**——`log`/`replay`/`export` 只 `openStore` 直读,绝不 `compose()`,否则"看一眼"就会往被观测的会话里写 recovery 事件;治理命令(resume/archive)反之必须走 session,状态转移才有 lifecycle 事件可重放
 - 配置:项目/全局配置合并,敏感字段不入日志;**key 命中 secret 模式(key/token/secret/password/credential)一律拒绝落盘**,指向环境变量
 

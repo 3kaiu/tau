@@ -164,6 +164,29 @@ describe("tau config(配置)", () => {
     await runCli(["config", "list", "--json", "--store", dbPath])
     expect(JSON.parse(stdout())).toEqual({ model: "gpt-5" })
   })
+
+  it("配置即契约:set 对 Config 已知键强转校验,非法退出 2 且不落盘", async () => {
+    err = []
+    expect(await runCli(["config", "set", "maxContextTokens", "abc", "--store", dbPath])).toBe(2)
+    expect(stderr()).toContain("非法配置")
+    err = []
+    expect(await runCli(["config", "set", "toolTierRules", "{bad", "--store", dbPath])).toBe(2)
+    expect(stderr()).toContain("非法配置")
+    const store = createStore("sqlite", dbPath)
+    expect(store.kv.list("config:")).toHaveLength(0)
+    store.close?.()
+  })
+
+  it("配置即契约:set 合法值强转后落盘,get 读到原始串", async () => {
+    expect(await runCli(["config", "set", "maxContextTokens", "16000", "--store", dbPath])).toBe(0)
+    expect(await runCli(["config", "set", "toolTierRules", '{"defaultTier":"T1","overrides":{"read":"T0"}}', "--store", dbPath])).toBe(0)
+    out = []
+    expect(await runCli(["config", "get", "maxContextTokens", "--store", dbPath])).toBe(0)
+    expect(stdout()).toBe("16000")
+    err = []
+    expect(await runCli(["config", "set", "maxContextTokens", "0", "--store", dbPath])).toBe(2)
+    expect(stderr()).toContain("非法配置")
+  })
 })
 
 describe("tau schedule(定时目标)", () => {

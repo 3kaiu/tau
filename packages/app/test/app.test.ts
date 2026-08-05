@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from "vitest"
 import type { LlmCollectResult, LlmKernel } from "@tau/llm"
+import { createMemoryStore } from "@tau/store"
 import { compose } from "../src/compose.ts"
 import { createPrintRenderer } from "@tau/surface"
 
@@ -136,5 +137,97 @@ describe("app:compose 端到端回路", () => {
     const out = renderer.flush()
     expect(out).toContain("重试 2")
     expect(out).toContain("打断")
+  })
+
+  it("compose config:configStore 装载 toolTierRules 裁剪投影,非法配置启动期报错", () => {
+    const store = createMemoryStore()
+    store.kv.set("config:toolTierRules", JSON.stringify({ defaultTier: "T1", overrides: { read: "T0", ls: "T0" } }))
+    store.kv.set("config:maxContextTokens", "64000")
+    const runtime = compose({ llm: fakeLlm(), cwd: "/tmp/tau-test", workspaceRoots: ["/tmp/tau-test"], autoApprove: true, store, configStore: store })
+    const names = runtime.session.project().tools.map((t) => t.name)
+    expect(names).toContain("read")
+    expect(names).toContain("ls")
+    expect(names).toContain("tool:catalog")
+    expect(names).not.toContain("bash")
+    expect(names).not.toContain("grep")
+
+    const bad = createMemoryStore()
+    bad.kv.set("config:maxContextTokens", "abc")
+    expect(() => compose({ llm: fakeLlm(), cwd: "/tmp/tau-test", workspaceRoots: ["/tmp/tau-test"], autoApprove: true, configStore: bad })).toThrow(/配置不合法/)
+  })
+
+  it("compose config:options.config 程序化覆写直达投影(tier 裁剪)", () => {
+    const runtime = compose({ llm: fakeLlm(), cwd: "/tmp/tau-test", workspaceRoots: ["/tmp/tau-test"], autoApprove: true, config: { toolTierRules: { defaultTier: "T1", overrides: { read: "T0" } }, maxContextTokens: 64000 } })
+    const names = runtime.session.project().tools.map((t) => t.name)
+    expect(names).toContain("read")
+    expect(names).toContain("ls")
+    expect(names).not.toContain("bash")
+    expect(names).not.toContain("grep")
+  })
+
+  it("memory:* syscall 面:记忆读写检索经 execute 闭环,索引块在重建时刷新", async () => {
+    const runtime = compose({ llm: fakeLlm(), cwd: "/tmp/tau-test", workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
+    const plane = runtime.action as unknown as { execute: (req: { sessionId: string; toolCallId: string; name: string; args: Record<string, unknown>; cwd?: string }) => Promise<{ ok: boolean; result?: { stdout: string }; error?: { code: string } }> }
+    const exec = (name: string, args: Record<string, unknown>, callId: string) =>
+      plane.execute({ sessionId: "main", toolCallId: callId, name, args, cwd: "/tmp/tau-test" })
+
+    // 写入记忆(经 execute,审计)
+    const wrote = await exec("memory:write", { key: "偏好", content: "简洁回复" }, "m1")
+    expect(wrote.ok).toBe(true)
+
+    // 覆盖保护:缺省拒绝,overwrite 放行
+    const denied = await exec("memory:write", { key: "偏好", content: "覆盖" }, "m2")
+    if (denied.ok) expect(denied.result!.stdout).toContain("拒绝覆盖")
+    const forced = await exec("memory:write", { key: "偏好", content: "覆盖后", overwrite: true }, "m2b")
+    if (forced.ok) expect(forced.result!.stdout).toContain("已写入")
+
+    // 读全文 + 检索 + 枚举
+    const read = await exec("memory:read", { key: "偏好" }, "m3")
+    if (read.ok) expect(read.result!.stdout).toBe("覆盖后")
+    const search = await exec("memory:search", { query: "覆盖" }, "m4")
+    if (search.ok) expect(search.result!.stdout).toContain("[偏好]")
+    const list = await exec("memory:list", {}, "m5")
+    if (list.ok) expect(list.result!.stdout).toContain("- [偏好]")
+
+    // 审计落盘
+    const audit = runtime.store.audit.query({ sessionId: "main" })
+    expect(audit.some((a) => a.action.startsWith("memory:write"))).toBe(true)
+
+    // 两级装载:索引块在会话创建/恢复时刷新(写入前创建的投影不含,重建后含)
+    expect(runtime.session.project().system.find((b) => b.kind === "memory")).toBeUndefined()
+    const refreshed = runtime.enhancer!.apply("main")
+    const memBlock = refreshed.systemBlocks.find((b) => b.kind === "memory")
+    expect(memBlock).toBeDefined()
+    expect(memBlock!.content).toContain("[偏好] 覆盖后")
+
+    runtime.session.close()
+  })
+
+  it("subagent:run syscall:委派子代理,结果回传,子会话落 store", async () => {
+    const runtime = compose({ llm: fakeLlm(), cwd: "/tmp/tau-test", workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
+    // 子代理视角的 llm 与父相同(fakeLlm 调用计数独立)
+    const plane = runtime.action as unknown as { execute: (req: { sessionId: string; toolCallId: string; name: string; args: Record<string, unknown>; cwd?: string }) => Promise<{ ok: boolean; result?: { stdout: string }; error?: { code: string } }> }
+
+    const outcome = await plane.execute({
+      sessionId: "main",
+      toolCallId: "s1",
+      name: "subagent:run",
+      args: { task: "调查文件结构" },
+      cwd: "/tmp/tau-test",
+    })
+    expect(outcome.ok).toBe(true)
+    if (outcome.ok) {
+      expect(outcome.result!.stdout).toContain("[子代理")
+      expect(outcome.result!.stdout).toContain("completed")
+    }
+
+    // 子会话落 store + 注册表(parentId 链)
+    const { listSubagents } = await import("@tau/orchestrate")
+    const regs = listSubagents(runtime.store, "main")
+    expect(regs.length).toBe(1)
+    expect(regs[0]!.status).toBe("completed")
+    expect(runtime.store.sessions.get(regs[0]!.sessionId)).not.toBeNull()
+
+    runtime.session.close()
   })
 })
