@@ -277,19 +277,20 @@ export class TranscriptView implements Component {
     this.cachedLines = null
   }
 
-  /** 进行中流行的可见文本(thinking/text 各成段,带 spinner)。 */
-  private streamLine(): string | null {
-    if (!this.streaming) return null
-    const parts: string[] = []
+  /** 进行中流行的可见行(thinking/正文各成段,带 spinner;对齐 kimi MoonLoader)。 */
+  private streamLines(): string[] {
+    if (!this.streaming) return []
+    const glyph = statusColor.accent(SPINNER[this.spinnerIdx % SPINNER.length]!)
+    const lines: string[] = []
     if (this.thinkingBuf !== "") {
-      parts.push(statusColor.dim(`(thinking) ${this.thinkingBuf}`))
+      lines.push(`${glyph} ${statusColor.dim("thinking...")}`)
+      lines.push(`${MESSAGE_INDENT}${statusColor.dim(this.thinkingBuf)}`)
     }
     if (this.textBuf !== "") {
-      parts.push(this.textBuf)
+      if (this.thinkingBuf !== "") lines.push("")
+      lines.push(`${glyph} ${this.textBuf}`)
     }
-    if (parts.length === 0) return null
-    const glyph = statusColor.accent(SPINNER[this.spinnerIdx % SPINNER.length]!)
-    return `${glyph} ${parts.join(" ")}`
+    return lines
   }
 
   /** 单条 Entry → 可见物理行(thinking 折叠/markdown 渲染在此分叉)。 */
@@ -330,8 +331,8 @@ export class TranscriptView implements Component {
   private mdWidth = -1
 
   render(width: number): string[] {
-    const streamLine = this.streamLine()
-    const showStream = streamLine !== null
+    const streamLines = this.streamLines()
+    const showStream = streamLines.length > 0
     const cacheStale = this.cachedLines === null || this.cachedWidth !== width || this.streamDirty || showStream !== this.cachedHasStream
     if (cacheStale) {
       this.cachedWidth = width
@@ -345,12 +346,14 @@ export class TranscriptView implements Component {
       this.cachedHasStream = false
     }
     this.streamDirty = false
-    if (streamLine === null) return this.cachedLines as string[]
+    if (streamLines.length === 0) return this.cachedLines as string[]
     // 有进行中流:不可直接复用缓存(会污染),每次重建并追加流式行
     const base = this.cachedLines as string[]
     const out = base.slice()
-    if (out.length >= this.maxRenderLines) out.shift()
-    out.push(wrapLine(streamLine, width))
+    for (const sl of streamLines) {
+      if (out.length >= this.maxRenderLines) out.shift()
+      out.push(wrapLine(sl, width))
+    }
     this.cachedHasStream = true
     return out
   }

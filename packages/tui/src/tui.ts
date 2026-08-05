@@ -10,7 +10,7 @@ import {
 } from "@earendil-works/pi-tui"
 import type { CommandFace } from "@tau/surface"
 import type { Event, GitStatus, Sender } from "@tau/contract"
-import { editorTheme } from "./theme.ts"
+import { editorTheme, statusColor } from "./theme.ts"
 import { TranscriptView } from "./views/transcript.ts"
 import { FooterComponent } from "./views/footer.ts"
 import { PermissionPopup, type PermissionDecision } from "./views/permission.ts"
@@ -51,6 +51,19 @@ export function createTui(deps: TuiDeps): Tui {
   const permissionPopup = new PermissionPopup()
 
   const editor = new Editor(ui, editorTheme, { paddingX: 1 })
+  // 聚焦高亮:pi-tui borderColor 是实例字段,聚焦时提亮边框(失焦回 dim)。
+  function focusEditor(): void {
+    editor.borderColor = (s) => statusColor.accent(s)
+    ui.setFocus(editor)
+    ui.requestRender()
+  }
+  editor.borderColor = (s) => statusColor.dim(s)
+  // 欢迎态(对齐 kimi welcome):首屏提示,不是交互元素。
+  transcript.setLines([
+    statusColor.accent(`● 欢迎使用 tau ${deps.model ? `· ${deps.model}` : ""}`),
+    statusColor.dim("  直接提问,或 /help 查看命令"),
+    "",
+  ])
   // kimi-code 风格底部状态栏(双行:mode/goal/model/pending/cwd/git + context 用量),贴编辑器下方
   const footer = new FooterComponent()
   footer.update({
@@ -164,7 +177,7 @@ export function createTui(deps: TuiDeps): Tui {
           footer.setTransient(`命令未接受: ${result.detail}`)
           ui.requestRender()
         }
-        ui.setFocus(editor)
+        focusEditor()
         return
     }
   }
@@ -198,7 +211,7 @@ export function createTui(deps: TuiDeps): Tui {
   ui.addChild(editor)
   ui.addChild(footer)
 
-  ui.setFocus(editor)
+  focusEditor()
   adjustLayout()
 
   const unsubscribe = face.subscribe(handleEvent)

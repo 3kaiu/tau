@@ -5,7 +5,7 @@
 
 import type { Component } from "@earendil-works/pi-tui"
 import type { Event, GitStatus } from "@tau/contract"
-import { statusColor } from "../theme.ts"
+import { statusColor, uiColor } from "../theme.ts"
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui"
 
 export type FooterState = {
@@ -159,7 +159,7 @@ export class FooterComponent implements Component {
     const s = this.state
     const slots: Record<string, string[]> = {}
 
-    if (s.busy) slots.busy = [statusColor.dim("●")]
+    if (s.busy) slots.busy = [uiColor.primary("●")]
 
     if (s.mode !== null) slots.mode = [statusColor.warn(s.mode)]
 
@@ -169,12 +169,12 @@ export class FooterComponent implements Component {
 
     if (s.model !== null) {
       const suffix = s.thinkingEffort !== null && s.thinkingEffort !== "off" ? ` thinking: ${s.thinkingEffort}` : ""
-      slots.model = [statusColor.accent(`${s.model}${suffix}`)]
+      slots.model = [uiColor.primary(`${s.model}${suffix}`)]
     }
 
     if (s.pendingCount > 0) slots.pending = [statusColor.warn(`[pending ${s.pendingCount}]`)]
 
-    if (s.cwd !== null) slots.cwd = [statusColor.dim(shortenCwd(s.cwd))]
+    if (s.cwd !== null) slots.cwd = [uiColor.muted(shortenCwd(s.cwd))]
 
     if (s.git !== null) slots.git = [formatGitBadge(s.git)]
 

@@ -441,11 +441,12 @@ describe("集成:Event 流驱动 transcript + tool-panel", () => {
     const first = tc.render(80)
     expect(first).toEqual([])
 
-    // 思考增量(thinking 通道)
+    // 思考增量(thinking 通道):独立 spinner 行 + 内容行
     tc.consume(ev({ kind: "text_delta", text: "先看目录", thinking: true }))
     const t1 = tc.render(80)
     expect(tc.isStreaming()).toBe(true)
-    expect(stripAnsi(t1[t1.length - 1]!)).toContain("(thinking) 先看目录")
+    expect(stripAnsi(t1[t1.length - 2]!)).toContain("thinking...")
+    expect(stripAnsi(t1[t1.length - 1]!)).toContain("先看目录")
 
     // 正文增量(text 通道)
     tc.consume(ev({ kind: "text_delta", text: "读了", thinking: false }))
