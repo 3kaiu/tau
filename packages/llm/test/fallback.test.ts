@@ -116,4 +116,15 @@ describe("fallback 降级链", () => {
     expect(stats.cachedTokenCandidates).toBe(100)
     expect(stats.cacheReadTokens).toBe(40)
   })
+
+  it("kernel 显式传静默 onError(防 AI SDK 默认 console.error 整坨 dump)", async () => {
+    mockStream.mockImplementation(async () => fakeFinish())
+    const kernel = createLlmKernel({ catalog: [model("A")] })
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+    for await (const _ of kernel.stream(projection("A"))) void _
+    // 传给 streamText 的 args 携带 onError,且是函数(静默回调)
+    const calledArgs = mockStream.mock.calls[0]?.[0] as { onError?: (...a: unknown[]) => void }
+    expect(typeof calledArgs.onError).toBe("function")
+    errSpy.mockRestore()
+  })
 })

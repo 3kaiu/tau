@@ -122,6 +122,9 @@ export function createLlmKernel(options: LlmKernelOptions): LlmKernel {
       model: provider,
       system,
       messages: messages as unknown as ModelMessage[],
+      // 错误归一化由本层 normalizeStream 承担(错误事件化);AI SDK 默认 onError
+      // 会把整个错误对象 console.error(堆栈/requestBody 全量),必须显式静默。
+      onError: () => {},
     }
     if (tools) args.tools = tools
     if (req?.toolChoice) args.toolChoice = req.toolChoice as ToolChoice<ToolSet>
