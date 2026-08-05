@@ -25,6 +25,8 @@ const THINKING_PREVIEW_LINES = 2
 
 export type TranscriptOptions = {
   maxLines?: number
+  /** 保留的最近轮数(user 消息计为轮边界;0 = 禁用轮裁剪,仅按 maxLines)。 */
+  maxTurns?: number
 }
 
 /** 已提交行:普通文本行 / markdown 块(assistant 正文,md 渲染) / thinking 块(可折叠) / 工具行(进行中/完成)。 */
@@ -140,6 +142,7 @@ function formatBlock(b: ContentBlock): string {
 export class TranscriptView implements Component {
   private entries: Entry[] = []
   private readonly maxLines: number
+  private readonly maxTurns: number
   private maxRenderLines = 200
   private cachedWidth = -1
   private cachedLines: string[] | null = null
@@ -155,6 +158,7 @@ export class TranscriptView implements Component {
 
   constructor(opts: TranscriptOptions = {}) {
     this.maxLines = opts.maxLines ?? 500
+    this.maxTurns = opts.maxTurns ?? 0
   }
 
   /** 设置渲染时最多返回的行数(从底部截取),由 TUI 按终端高度调控。 */
@@ -236,6 +240,10 @@ export class TranscriptView implements Component {
       }
       case "transcript": {
         this.resetStreaming()
+        // user 消息 = 轮边界:超过 maxTurns 时裁剪最老轮(参考 kimi 滑动窗口,保留最近 N 轮完整)
+        if (this.maxTurns > 0 && event.message.role === "user") {
+          this.trimToMaxTurns()
+        }
         this.appendEntries(formatMessage(event.message))
         break
       }
@@ -310,6 +318,26 @@ export class TranscriptView implements Component {
     if (this.entries.length > this.maxLines) {
       this.entries = this.entries.slice(this.entries.length - this.maxLines)
     }
+    this.cachedLines = null
+    this.mdComponent = null
+    this.mdText = ""
+    this.mdWidth = -1
+  }
+
+  /** 按轮裁剪:user 消息(✨ 前缀)计为轮边界,保留最近 maxTurns 轮,丢弃更老轮次。
+   * 防止单条超长消息挤掉多轮历史(参考 kimi 滑动窗口)。 */
+  private trimToMaxTurns(): void {
+    // 找所有轮边界(user 消息 entry 的首行)
+    const boundaries: number[] = []
+    for (let i = 0; i < this.entries.length; i++) {
+      const e = this.entries[i]
+      if (e?.kind === "text" && e.text.startsWith(USER_BULLET)) boundaries.push(i)
+    }
+    if (boundaries.length <= this.maxTurns - 1) return
+    // 在 user 消息 append 前调用:此时已有 maxTurns-1 个旧轮边界。
+    // 保留最近 maxTurns-1 个旧轮 + 即将 append 的当前轮 = 共 maxTurns 轮。
+    const keepFrom = boundaries[boundaries.length - (this.maxTurns - 1)]!
+    this.entries = this.entries.slice(keepFrom)
     this.cachedLines = null
     this.mdComponent = null
     this.mdText = ""

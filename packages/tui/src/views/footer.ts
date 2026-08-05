@@ -44,11 +44,12 @@ const STATUS_LINE_ITEMS = ["busy", "mode", "goal", "model", "pending", "cwd", "g
 /** tips 轮换(参考 kimi ROTATION):短提示成对展示,宽终端两两组合。 */
 const TIPS: { text: string; solo?: boolean }[] = [
   { text: "/help 查看命令" },
-  { text: "Ctrl+T 展开思考" },
-  { text: "Ctrl+C 打断/退出" },
-  { text: "/abort 终止当前 turn", solo: true },
-  { text: "/steer <text> 补充指令" },
-  { text: "/skill <name> 加载技能" },
+  { text: "Ctrl+T 展开思考 · Ctrl+O 工具结果" },
+  { text: "Ctrl+C 打断 · 双击退出" },
+  { text: "Ctrl+S 生成中补充指令", solo: true },
+  { text: "Shift+Enter 换行" },
+  { text: "/model <id> 切换模型" },
+  { text: "/abort 终止当前 turn" },
 ]
 const TIP_ROTATE_MS = 10_000
 const TIP_SEPARATOR = " | "

@@ -630,4 +630,21 @@ describe("集成:底部状态栏(footer)", () => {
     d.handleInput("x")
     expect(d.isActive()).toBe(false)
   })
+
+  it("按轮裁剪:保留最近 maxTurns 轮,单条超长不挤掉多轮", () => {
+    const tc = new TranscriptView({ maxTurns: 3 })
+
+    // 灌入 5 轮多轮对话,每轮含一条超长 assistant 尾
+    for (let i = 0; i < 5; i++) {
+      tc.consume(transcript(userMsg(`第${i}轮问题`)))
+      tc.consume(transcript(assistantMsg(`回答${i}  ` + "长".repeat(50))))
+    }
+
+    const out = stripAnsi(tc.render(80).join("\n"))
+    // 只保留最近 3 轮(第 0、1 轮被裁剪)
+    expect(out).not.toContain("第0轮问题")
+    expect(out).not.toContain("第1轮问题")
+    expect(out).toContain("第2轮问题")
+    expect(out).toContain("第4轮问题")
+  })
 })

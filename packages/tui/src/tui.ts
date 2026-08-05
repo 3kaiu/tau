@@ -51,7 +51,7 @@ export function createTui(deps: TuiDeps): Tui {
   const terminal = new ProcessTerminal()
   const ui = new PiTui(terminal)
 
-  const transcript = new TranscriptView({ maxLines: 1000 })
+  const transcript = new TranscriptView({ maxLines: 1000, maxTurns: 15 })
   const permissionPopup = new PermissionPopup()
   const infoDialog = new InfoDialog()
 
@@ -256,6 +256,27 @@ export function createTui(deps: TuiDeps): Tui {
       transcript.toggleTool()
       ui.requestRender()
       return { consume: true }
+    }
+    // Ctrl+S:把当前输入作为 steer 注入(对齐 kimi;空输入无效)
+    if (matchesKey(data, "ctrl+s")) {
+      const text = editor.getText?.().trim() ?? ""
+      if (text === "" || transcript.isStreaming() === false) {
+        footer.setTransient("Ctrl+S 需在生成中输入补充指令")
+        ui.requestRender()
+        return { consume: true }
+      }
+      editor.setText("")
+      void submit(`/steer ${text}`)
+      return { consume: true }
+    }
+    // Ctrl+D:空输入时退出;有输入时删除(编辑器默认行为)
+    if (matchesKey(data, "ctrl+d")) {
+      const text = editor.getText?.() ?? ""
+      if (text === "" && !transcript.isStreaming() && !infoDialog.isActive() && !permissionPopup.isActive()) {
+        stop()
+        return { consume: true }
+      }
+      return undefined // 交给编辑器处理(删除字符)
     }
     if (matchesKey(data, "ctrl+c")) {
       if (infoDialog.isActive()) {

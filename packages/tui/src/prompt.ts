@@ -75,7 +75,19 @@ export function parseInput(raw: string, sender: Sender): ParsedInput {
 }
 
 export function formatHelp(): string {
-  const lines = ["斜杠命令:"]
+  const shortcuts = [
+    ["Enter", "发送 / 关闭弹窗"],
+    ["Shift+Enter", "输入内换行"],
+    ["↑ / ↓", "回顾输入历史"],
+    ["Ctrl+T", "展开/收起思考"],
+    ["Ctrl+O", "展开/收起工具结果"],
+    ["Ctrl+S", "生成中注入补充指令(steer)"],
+    ["Ctrl+C", "打断 或 双击退出"],
+    ["Ctrl+D", "空输入退出"],
+    ["Tab", "命令/路径补全"],
+  ]
+  const kbdWidth = Math.max(8, ...shortcuts.map(([k]) => k!.length))
+  const lines = ["快捷键:", ...shortcuts.map(([k, d]) => `  ${k!.padEnd(kbdWidth)}  ${d}`), "", "斜杠命令:"]
   for (const cmd of SLASH_COMMANDS) {
     const aliases = cmd.aliases !== undefined ? ` (${cmd.aliases.join(", ")})` : ""
     lines.push(`  ${cmd.usage}${aliases}  - ${cmd.description}`)
