@@ -252,6 +252,27 @@ describe("store: sqlite 持久化(文件)", () => {
     store2.close?.()
     rmSync(`${tmp}.lock`, { force: true })
   })
+
+  it("P1-9:readonly 打开真只读——不建文件、不迁移、写语句拒绝", () => {
+    if (!isBun) return
+    const tmp = `/tmp/tau-store-ro-${Date.now()}.sqlite`
+    const { mkdtempSync, rmSync, existsSync } = require("node:fs") as typeof import("node:fs")
+    const dir = mkdtempSync("/tmp/tau-ro-")
+    // 不存在路径:readonly 打开不建文件(观测命令绝不因"看一眼"落库)
+    const missing = `${dir}/missing.sqlite`
+    expect(() => createStore("sqlite", missing, { readonly: true })).toThrow()
+    expect(existsSync(missing)).toBe(false)
+    // 已迁移库:readonly 可读,但写语句被拒(query_only)
+    const store = createStore("sqlite", tmp)
+    store.kv.set("k", "v")
+    store.close?.()
+    const ro = createStore("sqlite", tmp, { readonly: true })
+    expect(ro.kv.get("k")).toBe("v")
+    expect(() => ro.migrate()).not.toThrow()
+    expect(() => ro.kv.set("write", "should-fail")).toThrow()
+    ro.close?.()
+    rmSync(dir, { recursive: true, force: true })
+  })
 })
 
 describe("store: audit 归档(保留策略)", () => {

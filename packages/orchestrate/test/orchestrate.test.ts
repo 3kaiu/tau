@@ -167,6 +167,64 @@ describe("orchestrate:turn 状态机", () => {
     expect(events.some((e) => e.kind === "loop_detected")).toBe(true)
   })
 
+  it("P1-6:循环触发后同批剩余调用显式 rejected(不静默丢结果)", async () => {
+    const events: Event[] = []
+    const { store, session, scheduler } = fresh(() => ({ text: "", thinking: "", toolCalls: [
+      { id: "c1", name: "read", args: { path: "a.txt" } },
+      { id: "c2", name: "read", args: { path: "a.txt" } },
+      { id: "c3", name: "read", args: { path: "a.txt" } },
+      { id: "c4", name: "read", args: { path: "b.txt" } },
+    ], usage: undefined, finishReason: "tool-calls", error: undefined, aborted: false }))
+    scheduler.subscribe((e) => events.push(e))
+    await scheduler.prompt({ text: "循环+剩余" })
+    // 同批全部 4 个 call 都有结果(执行/rejected 二选一),无"结果丢失"
+    const toolMsgs = store.messages.list("s1").messages.filter((m) => m.role === "tool")
+    const covered = toolMsgs.flatMap((m) => m.toolResults.map((r) => r.callId))
+    expect(covered).toEqual(expect.arrayContaining(["c1", "c2", "c3", "c4"]))
+    expect(toolMsgs.some((m) => m.toolResults.some((r) => r.error?.message.includes("同批剩余调用被拦截")))).toBe(true)
+    expect(session.project().history.filter((m) => m.role === "tool").length).toBe(4)
+    expect(events.some((e) => e.kind === "loop_detected")).toBe(true)
+  })
+
+  it("P1-6:LoopGuard 按 prompt 重置,跨任务同指纹不毒化", async () => {
+    const events: Event[] = []
+    const { store, session } = freshSession()
+    const llm = fakeLlm((calls) => {
+      if (calls < 2 || calls === 3) return { text: "", thinking: "", toolCalls: [{ id: `t${calls}`, name: "read", args: { path: "a.txt" } }], usage: undefined, finishReason: "tool-calls", error: undefined, aborted: false }
+      return { text: "收尾", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop", error: undefined, aborted: false }
+    })
+    const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
+    const scheduler = createScheduler({ llm, session, action }, { maxTurns: 5, loopGuard: 2, maxTurnMs: 2000 })
+    scheduler.subscribe((e) => events.push(e))
+    // 任务1:2 次 read(a.txt);任务2:1 次 read(a.txt)——阈值 2,若跨任务累积第 3 次会误掐
+    await scheduler.prompt({ text: "任务1" })
+    const result = await scheduler.prompt({ text: "任务2" })
+    expect(result.error).toBeNull()
+    expect(events.some((e) => e.kind === "loop_detected")).toBe(false)
+    const audit = store.audit.query({ sessionId: "s1" })
+    expect(audit.filter((a) => a.action === "read:ok").length).toBe(3)
+    session.close()
+  })
+
+  it("P1-6:maxToolCallsPerTurn 超限 → 被删调用显式 rejected + budget_exceeded", async () => {
+    const events: Event[] = []
+    const { store, session } = freshSession()
+    const llm = fakeLlm(() => ({ text: "", thinking: "", toolCalls: [
+      { id: "m1", name: "read", args: { path: "1.txt" } },
+      { id: "m2", name: "read", args: { path: "2.txt" } },
+      { id: "m3", name: "read", args: { path: "3.txt" } },
+    ], usage: undefined, finishReason: "tool-calls", error: undefined, aborted: false }))
+    const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
+    const scheduler = createScheduler({ llm, session, action }, { maxToolCallsPerTurn: 2, maxTurns: 2 })
+    scheduler.subscribe((e) => events.push(e))
+    await scheduler.prompt({ text: "超限" })
+    expect(events.some((e) => e.kind === "budget_exceeded" && e.metric === "maxToolCallsPerTurn")).toBe(true)
+    const toolMsgs = store.messages.list("s1").messages.filter((m) => m.role === "tool")
+    // 每轮 3 个调用:前 2 个执行,第 3 个显式被拦截(不静默删)
+    expect(toolMsgs.length).toBeGreaterThanOrEqual(3)
+    expect(toolMsgs.some((m) => m.toolResults.some((r) => r.callId === "m3" && r.error?.message.includes("被拦截")))).toBe(true)
+  })
+
   it("turn 提交点:审计带 turnId,commitTurn 落 kv 锚点,已提交 turn 崩溃恢复不误报", async () => {
     const { store, scheduler } = fresh((calls) =>
       calls === 0
@@ -255,6 +313,82 @@ export function makeMessage(partial: Partial<Message>): Message {
 
 export type { ActionPlane, LlmRequest, Session }
 export { toolResult }
+
+describe("orchestrate:预算强制(P1-4)", () => {
+  it("onBudgetExceeded=abort 且累计超限 → 真 abort,不再调模型", async () => {
+    const store = createMemoryStore()
+    const session = createSession({ store, sessionId: "s1", cwd: "/tmp/tau-test", workspaceRoots: ["/tmp/tau-test"], maxContextTokens: 100, onBudgetExceeded: "abort" })
+    const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
+    let calls = 0
+    const llm: LlmKernel = {
+      stream: async function* () {},
+      complete: async (): Promise<LlmCollectResult> => {
+        calls++
+        // 每轮返回 200 tokens 的真实用量(一次就超 100 上限)
+        return { text: "超预算输出", thinking: "", toolCalls: [], usage: { promptTokens: 100, completionTokens: 100, totalTokens: 200 }, finishReason: "stop", error: undefined, aborted: false }
+      },
+      models: () => [], getModel: () => null,
+      features: () => ({ streaming: true, tools: true, thinking: false, vision: false }),
+      getAuth: () => null, cachePolicy: () => ({ mode: "off", ttlMs: 0 }), refresh: () => {},
+    }
+    const scheduler = createScheduler({ llm, session, action }, { model: "fake", maxTurns: 10 })
+    const events: Event[] = []
+    scheduler.subscribe((e) => events.push(e))
+    const result = await scheduler.prompt({ text: "跑吧", source: "prompt" })
+    expect(calls).toBe(1)
+    expect(result.error).toContain("预算已超限")
+    expect(events.some((e) => e.kind === "budget_exceeded")).toBe(true)
+  })
+})
+
+describe("orchestrate:prompt busy 守卫(P0-4)", () => {
+  it("running 期间再次 prompt → 拒绝(不并行跑同一 session)", async () => {
+    let release: (() => void) | null = null
+    const gate = new Promise<void>((r) => { release = r })
+    const store = createMemoryStore()
+    const session = createSession({ store, sessionId: "s1", cwd: "/tmp/tau-test", workspaceRoots: ["/tmp/tau-test"] })
+    const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
+    const slowLlm: LlmKernel = {
+      stream: async function* () {},
+      complete: async () => {
+        await gate
+        return { text: "done", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop", error: undefined, aborted: false }
+      },
+      models: () => [], getModel: () => null,
+      features: () => ({ streaming: true, tools: true, thinking: false, vision: false }),
+      getAuth: () => null, cachePolicy: () => ({ mode: "off", ttlMs: 0 }), refresh: () => {},
+    }
+    const scheduler = createScheduler({ llm: slowLlm, session, action }, { model: "fake", maxTurns: 5 })
+    const first = scheduler.prompt({ text: "第一个", source: "prompt" })
+    const second = await scheduler.prompt({ text: "第二个", source: "prompt" })
+    expect(second.aborted).toBe(true)
+    expect(second.error).toContain("会话忙")
+    release?.()
+    await first
+    expect(store.events.replay("s1").some((e) => e.kind === "transcript")).toBe(true)
+  })
+})
+
+describe("orchestrate:model_switched 构造点", () => {
+  it("llm onEvent(model-switched)→ scheduler 发 model_switched 契约事件", async () => {
+    const { store, session } = freshSession()
+    const events: Event[] = []
+    const base = fakeLlm(() => ({ text: "done", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop" as const, error: undefined, aborted: false }))
+    const llm: LlmKernel = {
+      ...base,
+      complete: async (_p, req?: LlmRequest) => {
+        req?.onEvent?.({ type: "model-switched", from: "A", to: "B" })
+        return { text: "done", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop", error: undefined, aborted: false }
+      },
+    }
+    const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
+    const scheduler = createScheduler({ llm, session, action }, { model: "fake", maxTurns: 1 })
+    scheduler.subscribe((e) => events.push(e))
+    const result = await scheduler.prompt({ text: "hi", source: "prompt" })
+    expect(result.error).toBeNull()
+    expect(events.some((e) => e.kind === "model_switched" && e.from === "A" && e.to === "B")).toBe(true)
+  })
+})
 
 describe("orchestrate:goal_continue 续跑", () => {
   it("Goal 未完成 → goal_continue 唤醒续跑(计入上限),完成后停止", async () => {
@@ -530,5 +664,50 @@ describe("orchestrate:subagent 生命周期管理器(M12)", () => {
     expect(l3.depth).toBe(3)
     expect(l3.status).toBe("partial")
     expect(l3.text).toContain("深度超限")
+  })
+
+  it("P1-10:缺省白名单不含 retrieve(父子检索隔离);子会话投影无 retrieve", async () => {
+    expect(SUBAGENT_DEFAULT_TOOLS).not.toContain("retrieve")
+    const { store, session } = freshSession()
+    const llm = fakeLlm(() => ({ text: "ok", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop" as const, error: undefined, aborted: false }))
+    const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
+
+    const result = await runSubagent(
+      { llm, store, action, session },
+      { parentSessionId: "s1", task: "检查" },
+    )
+    expect(result.status).toBe("completed")
+    // 子会话投影只含白名单工具(读面),检索父历史的 retrieve 不存在
+    const childSessionId = result.sessionId
+    const childMessages = store.messages.list(childSessionId).messages
+    const projected = childMessages.some((m) => m.content.some((c) => c.type === "text" && c.text.includes("retrieve")))
+    expect(projected).toBe(false)
+  })
+
+  it("P1-10:depthOf 环检测(注册表损坏 → 封顶返回,不毒化深度链)", () => {
+    const { store } = freshSession()
+    store.kv.set("subagent:a", JSON.stringify({ sessionId: "a", parentSessionId: "b", depth: 1, status: "running", createdAt: "t", updatedAt: "t" }))
+    store.kv.set("subagent:b", JSON.stringify({ sessionId: "b", parentSessionId: "a", depth: 1, status: "running", createdAt: "t", updatedAt: "t" }))
+    expect(depthOf(store, "a")).toBeLessThan(100)
+    expect(depthOf(store, "a")).toBe(2)
+    expect(depthOf(store, "s1")).toBe(0)
+  })
+
+  it("P1-10:注册表写入失败 → 拒绝派生且 limiter 计数释放", async () => {
+    const { store, session } = freshSession()
+    const brokenKv = Object.create(store.kv) as typeof store.kv
+    brokenKv.set = () => { throw new Error("kv down") }
+    const broken = Object.create(store) as typeof store
+    broken.kv = brokenKv
+    const llm = fakeLlm(() => ({ text: "ok", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop" as const, error: undefined, aborted: false }))
+    const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
+
+    const result = await runSubagent(
+      { llm, store: broken, action, session },
+      { parentSessionId: "s1", task: "任务" },
+    )
+    expect(result.status).toBe("partial")
+    expect(result.text).toContain("注册表写入失败")
+    expect(subagentUsage().global).toBe(0)
   })
 })

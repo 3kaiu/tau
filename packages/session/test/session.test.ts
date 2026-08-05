@@ -309,6 +309,36 @@ describe("压缩是交换不是丢弃", () => {
     expect(live.some((m) => m.id === summary?.id)).toBe(true)
     expect(store.messages.archiveSearch("s1", "消息0", 0, 10).total).toBeGreaterThan(0)
   })
+
+  it("压缩收口:admit 缺省可压缩,摘要不形成墙(summaryIds 截断展示)", () => {
+    const store = createStore("memory")
+    const session = createSession(makeOptions(store))
+    // admit 缺省 retention=normal → 超窗口可压缩(不因全 high 而死锁)
+    for (let i = 0; i < 10; i++) session.admit({ text: `用户消息${i}`, source: "cli", wake: "prompt" })
+    const p0 = session.project()
+    expect(p0.history.every((m) => m.retention === "normal")).toBe(true)
+    session.compact("token-budget", "第一轮摘要")
+    const p1 = session.project()
+    expect(p1.history.some((m) => m.content.some((c) => c.type === "text" && c.text === "第一轮摘要"))).toBe(true)
+    // 摘要 retention=normal → 二次压缩可再折叠(摘要不无限累积成墙)
+    const before = store.messages.list(session.sessionId).messages.length
+    let total = 11
+    for (let round = 0; round < 8; round++) {
+      for (let i = 0; i < 6; i++) session.admit({ text: `用户消息${total++}`, source: "cli", wake: "prompt" })
+      session.compact("token-budget", `第${round + 2}轮摘要`)
+    }
+    const after = store.messages.list(session.sessionId).messages.length
+    expect(after).toBeLessThan(before + 49)
+    // summaryIds 超限 → 投影只显示最近 8 条 + 总数
+    const p2 = session.project()
+    const hint = p2.system.find((b) => b.kind === "context" && b.content.includes("已压缩"))
+    expect(hint).toBeDefined()
+    if (hint !== undefined) {
+      const idsPart = (hint.content.match(/摘要消息 id: ([^)]*?)(?:,…\(共 \d+ 条\))?/) ?? [])[1] ?? ""
+      expect(idsPart.split(", ").filter(Boolean).length).toBeLessThanOrEqual(8)
+      expect(hint.content).toContain("共 ")
+    }
+  })
 })
 
 describe("diff 与重放一致性", () => {

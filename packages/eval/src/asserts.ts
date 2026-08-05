@@ -9,10 +9,11 @@ import { createEnhancer } from "@tau/enhance"
 import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 import { assertDualView, assertReplay, assertToolPairing, checkBudget, parseMergedConfig, type UiView } from "@tau/contract"
-import type { ScheduleEntry } from "@tau/orchestrate"
+import { createScheduler, depthOf, SUBAGENT_DEFAULT_TOOLS, type ScheduleEntry } from "@tau/orchestrate"
+import { assembleSystem, toAiMessages } from "@tau/llm"
 import type { Assert } from "./eval.ts"
 import { createFixture, runTurn } from "./fixtures.ts"
-import { textReply, toolReply } from "./faux.ts"
+import { textReply, toolReply, createFauxLlm } from "./faux.ts"
 
 // ---------- 1. 双视角不变量 ----------
 
@@ -1259,11 +1260,182 @@ const assert33: Assert = {
   },
 }
 
+// ---------- 34. 模型可见面(kernel 唯一转换器,审计9 P0-1/P0-2 回归闸) ----------
+
+const assert34: Assert = {
+  id: 34,
+  name: "模型可见面(kernel 唯一转换器:投影无隐藏字段)",
+  description: "self/wake/resources 折叠进 system;artifact/thinking 块渲染进消息;FauxLlm 禁 void projection",
+  async run() {
+    const dir = `/tmp/tau-eval-kernel-${Date.now()}`
+    mkdirSync(dir, { recursive: true })
+    const store = createMemoryStore()
+    const session = createSession({
+      store,
+      sessionId: "eval-kernel",
+      cwd: dir,
+      workspaceRoots: [dir],
+      artifactThresholdBytes: 64,
+    })
+
+    // 大输入外置 → 模型输入必须见到 [artifact:ref …]
+    const big = "大载荷".repeat(300)
+    session.admit({ text: big, wake: "prompt", source: "eval" })
+
+    // thinking 块进历史 → 模型输入必须见到 <thinking> 渲染
+    session.appendMessage({
+      id: "m-think",
+      role: "assistant",
+      content: [{ type: "thinking", text: "推理过程" }],
+      toolCalls: [],
+      toolResults: [],
+      interrupted: false,
+      source: "model",
+      retention: "normal",
+      createdAt: new Date().toISOString(),
+    })
+
+    const projection = session.project()
+
+    // 真转换器(与生产同一函数;FauxLlm 内部对每次调用跑同一断言)
+    const system = assembleSystem(projection)
+    if (!system.includes(`唤醒:${projection.wake.reason}`)) throw new Error("wake 未折叠进 system")
+    if (!system.includes(`模型:${projection.self.model.id}`)) throw new Error("self 未折叠进 system")
+    if (!system.includes(`cwd:${dir}`)) throw new Error("self.cwd 未折叠进 system")
+    if (!system.includes("workspaceRoots")) throw new Error("resources 未折叠进 system")
+
+    const raw = JSON.stringify(toAiMessages(projection.history))
+    if (!raw.includes("[artifact:ref ")) throw new Error("artifact 引用块未渲染进模型输入")
+    if (!raw.includes("<thinking>")) throw new Error("thinking 块未渲染进模型输入")
+    if (raw.includes(big)) throw new Error("大载荷正文泄漏进模型输入(违宪:不烧上下文)")
+
+    // 全链路:调度一轮经 scheduler→kernel→FauxLlm,可见面断言在模型侧触发
+    const action = createActionPlane(store, { workspaceRoots: [dir], autoApprove: true })
+    const scheduler = createScheduler({ llm: createFauxLlm({ replies: [textReply("继续")] }), session, action })
+    const turn = await scheduler.prompt({ text: "读一下大载荷内容", source: "prompt" })
+    if (turn.error !== null) throw new Error(`全链路轮未完成:${turn.error}`)
+
+    session.close()
+    rmSync(dir, { recursive: true, force: true })
+  },
+}
+
+const assert35: Assert = {
+  id: 35,
+  name: "审计9 闭环:忙守卫/预算强制/压缩收口/LoopGuard/subagent 隔离/配置即契约",
+  description: "P0-4 busy 拒绝并行、P1-4 预算真 abort、P1-6 LoopGuard 跨任务重置、P1-7 admit 缺省可压缩、P1-10 白名单无 retrieve + 环检测、P1-15 未知配置键拒绝",
+  async run() {
+    const dir = `/tmp/tau-eval-audit9-${Date.now()}`
+    mkdirSync(dir, { recursive: true })
+
+    // ---- P0-4:prompt busy 守卫(并行不跑同一 session)----
+    {
+      let resolvePerm: (v: boolean) => void = () => {}
+      const gate = new Promise<boolean>((res) => { resolvePerm = res })
+      const store = createMemoryStore()
+      const session = createSession({ store, sessionId: "eval-busy", cwd: dir, workspaceRoots: [dir] })
+      const action = createActionPlane(store, { workspaceRoots: [dir], autoApprove: false, onPermission: () => gate })
+      const scheduler = createScheduler(
+        { llm: createFauxLlm({ replies: [toolReply([{ id: "c1", name: "bash", args: { command: "ls" } }])] }), session, action },
+        { maxTurnMs: 5000, maxRetries: 0 },
+      )
+      const first = scheduler.prompt({ text: "跑" })
+      await new Promise((res) => setTimeout(res, 30))
+      const second = await scheduler.prompt({ text: "再跑" })
+      if (!second.aborted || second.error === null || !second.error.includes("会话忙")) throw new Error(`busy 守卫未生效:${JSON.stringify(second)}`)
+      resolvePerm(true)
+      const firstResult = await first
+      if (firstResult.error !== null) throw new Error(`首轮不应失败:${firstResult.error}`)
+      session.close()
+    }
+
+    // ---- P1-4:预算 abort 真停(超限后不再调模型)----
+    {
+      const store = createMemoryStore()
+      const session = createSession({ store, sessionId: "eval-budget", cwd: dir, workspaceRoots: [dir], maxContextTokens: 100, onBudgetExceeded: "abort" })
+      const action = createActionPlane(store, { workspaceRoots: [dir], autoApprove: true })
+      const events: import("@tau/contract").Event[] = []
+      const scheduler = createScheduler(
+        { llm: createFauxLlm({ replies: [{ text: "重活", usage: { promptTokens: 100, completionTokens: 100, totalTokens: 200 } }] }), session, action },
+        { maxTurns: 4, onEvent: (e) => events.push(e) },
+      )
+      const result = await scheduler.prompt({ text: "干重活" })
+      if (result.error === null || !result.error.includes("预算已超限")) throw new Error(`预算 abort 未触发:${result.error}`)
+      if (result.turns !== 1) throw new Error(`超限后仍继续调度:${result.turns} turns`)
+      if (!events.some((e) => e.kind === "budget_exceeded")) throw new Error("缺 budget_exceeded 事件")
+      session.close()
+    }
+
+    // ---- P1-7:admit 缺省可压缩 + P1-6:LoopGuard 跨任务重置 ----
+    {
+      const store = createMemoryStore()
+      const session = createSession({ store, sessionId: "eval-guard", cwd: dir, workspaceRoots: [dir] })
+      for (let i = 0; i < 10; i++) session.admit({ text: `用户消息${i}`, source: "eval", wake: "prompt" })
+      const live = store.messages.list("eval-guard").messages
+      if (!live.every((m) => m.retention === "normal")) throw new Error("admit 缺省应可压缩(normal)")
+      const before = live.length
+      session.compact("token-budget", "摘要")
+      const after = store.messages.list("eval-guard").messages.length
+      if (after >= before) throw new Error("压缩未发生(admit 缺省 high 死锁)")
+      if (session.retrieve({ query: "用户消息0" }).total === 0) throw new Error("压缩后不可回源(宪法六)")
+      // LoopGuard:同指纹跨任务 3 次不触发(阈值 2),同任务内第 3 次触发
+      const action = createActionPlane(store, { workspaceRoots: [dir], autoApprove: true })
+      let llmCalls = 0
+      const llm = {
+        stream: async function* () {},
+        complete: async () => {
+          const n = llmCalls++
+          if (n < 2 || n === 3) return { text: "", thinking: "", toolCalls: [{ id: "t", name: "read", args: { path: "a.txt" } }], usage: undefined, finishReason: "tool-calls", error: undefined, aborted: false }
+          return { text: "收尾", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop", error: undefined, aborted: false }
+        },
+        models: () => [], getModel: () => null,
+        features: () => ({ supportsTools: true, supportsThinking: true, supportsParallelCalls: true, supportsVision: false, supportsStreaming: true }),
+        getAuth: () => null, cachePolicy: () => ({ mode: "off", ttlMs: 0 }),
+        cacheStats: () => ({ calls: 0, cachedTokenCandidates: 0, cacheReadTokens: 0 }), refresh: () => {},
+      } as unknown as import("@tau/llm").LlmKernel
+      const s2 = createSession({ store, sessionId: "eval-loop", cwd: dir, workspaceRoots: [dir] })
+      const scheduler = createScheduler({ llm, session: s2, action }, { maxTurns: 3, loopGuard: 2 })
+      const loopedEvents: import("@tau/contract").Event[] = []
+      scheduler.subscribe((e) => { if (e.kind === "loop_detected") loopedEvents.push(e) })
+      const r1 = await scheduler.prompt({ text: "任务1" })
+      if (loopedEvents.length !== 0) throw new Error(`任务1 不应触发循环:${loopedEvents.length}`)
+      if (r1.error !== null) throw new Error(`任务1 失败:${r1.error}`)
+      const r2 = await scheduler.prompt({ text: "任务2" })
+      if (loopedEvents.length !== 0) throw new Error(`任务2 同指纹被旧计数毒化(审计9 P1-6 未修)` )
+      if (r2.error !== null) throw new Error(`任务2 失败:${r2.error}`)
+      s2.close()
+      session.close()
+    }
+
+    // ---- P1-10:subagent 缺省白名单无 retrieve + depthOf 环检测 ----
+    {
+      if ((SUBAGENT_DEFAULT_TOOLS as readonly string[]).includes("retrieve")) throw new Error("subagent 缺省白名单不应含 retrieve(父子检索穿透)")
+      const store = createMemoryStore()
+      store.kv.set("subagent:a", JSON.stringify({ sessionId: "a", parentSessionId: "b", depth: 1, status: "running", createdAt: "t", updatedAt: "t" }))
+      store.kv.set("subagent:b", JSON.stringify({ sessionId: "b", parentSessionId: "a", depth: 1, status: "running", createdAt: "t", updatedAt: "t" }))
+      const d = depthOf(store, "a")
+      if (d !== 2) throw new Error(`depthOf 环未封顶:${d}`)
+    }
+
+    // ---- P1-15:未知配置键拒绝(不静默剥掉)----
+    {
+      try {
+        parseMergedConfig({ uiTheme: "dark" })
+        throw new Error("未知配置键应拒绝")
+      } catch (e) {
+        if (e instanceof Error && e.message === "未知配置键应拒绝") throw e
+      }
+    }
+
+    rmSync(dir, { recursive: true, force: true })
+  },
+}
+
 export const allAsserts: readonly Assert[] = [
   assert1, assert2, assert3, assert4, assert5, assert6,
   assert7, assert8, assert9, assert10, assert11, assert12, assert13,
   assert14, assert15, assert16, assert17, assert18,
   assert19, assert20, assert21, assert22,
   assert23, assert24, assert25, assert26, assert27, assert28, assert29, assert30,
-  assert31, assert32, assert33,
+  assert31, assert32, assert33, assert34, assert35,
 ]

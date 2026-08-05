@@ -37,7 +37,7 @@ export const ConfigSchema = z.object({
   capabilityDefaults: z.array(CapabilityRuleSchema).default([]),
   compaction: CompactionPolicySchema.default({ triggerRatio: 0.8, keepRecent: 6 }),
   thinking: ThinkingPolicySchema.default({ maxBytes: 32 * 1024 }),
-})
+}).strict()
 export type Config = z.infer<typeof ConfigSchema>
 
 // ---------- 配置装载配套(纯 schema 驱动,零业务决策;惯用型同 invariant.ts) ----------

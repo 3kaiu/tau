@@ -2,7 +2,7 @@
 // 不生成上下文(委托 session.project)、不执行工具(委托 action.execute);
 // turn 是原子单位;任何中断是状态机输入;重试/打断/循环全可见可审计。
 
-import type { Event, Goal, Message } from "@tau/contract"
+import { createEventIdGenerator, estimateTokens, type ContextProjection, type Event, type Goal, type Message } from "@tau/contract"
 import type { LlmKernel, LlmCollectResult, LlmRequest } from "@tau/llm"
 import type { Session } from "@tau/session"
 import type { ActionPlane } from "@tau/action"
@@ -60,7 +60,7 @@ type EventInput = {
     : never
 }[Event["kind"]]
 
-const uuid = () => crypto.randomUUID()
+const uuid = createEventIdGenerator()
 const clock = () => new Date().toISOString()
 
 export interface Scheduler {
@@ -105,8 +105,15 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
   }
 
   function llmRequest(): LlmRequest {
-    if (options.model !== undefined) return { model: options.model }
-    return {}
+    return {
+      ...(options.model !== undefined ? { model: options.model } : {}),
+      // model_switched 构造点:kernel 降级链事件 → 契约事件(经 emit 全量可见/落库)
+      onEvent: (event) => {
+        if (event.type === "model-switched") {
+          emitRaw({ kind: "model_switched", from: event.from, to: event.to, reason: "fallback" })
+        }
+      },
+    }
   }
 
   async function runTurn(input: SchedulerInput): Promise<TurnResult> {
@@ -122,11 +129,22 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
     let toolCalls = 0
     let lastError: string | null = null
 
+    // 循环判定只限本 prompt 的迭代序列(任务边界重置:换任务后合法复用不被旧指纹毒化)
+    behaviorGuard.reset()
+
     for (; turns < maxTurns; ) {
       turns++
       if (signal.aborted) {
         emitRaw({ kind: "interrupted", targetId: session.sessionId })
         return { turns, text, toolCalls, aborted: true, error: lastError }
+      }
+      // 预算强制(审计9 P1-4):onBudgetExceeded=abort 时累计超限 → 真 abort,不再调模型
+      const proj = session.project()
+      if (budgetAborted(proj)) {
+        const limit = proj.self.usage.estimatedRemaining + proj.self.usage.cumulativeTokens
+        lastError = `预算已超限(abort):累计 ${proj.self.usage.cumulativeTokens} >= ${limit}`
+        emitRaw({ kind: "budget_exceeded", metric: "cumulativeTokens", used: proj.self.usage.cumulativeTokens, limit })
+        break
       }
       session.beginTurn()
       // turnId = 会话 epoch(经 kv 持久:跨重启单调不重置,进程内同会话不重复);审计与提交点共用此锚
@@ -172,16 +190,34 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
 
       if (result.usage) session.recordUsage(result.usage)
       text = result.text
+      // 预算强制:无工具调用也会自然结束的 turn,若已超限同样在收尾前 abort
+      if (budgetAborted(session.project())) {
+        const projNow = session.project()
+        const limit = projNow.self.usage.estimatedRemaining + projNow.self.usage.cumulativeTokens
+        lastError = `预算已超限(abort):累计 ${projNow.self.usage.cumulativeTokens} >= ${limit}`
+        emitRaw({ kind: "budget_exceeded", metric: "cumulativeTokens", used: projNow.self.usage.cumulativeTokens, limit })
+        break
+      }
 
       const calls = result.toolCalls.slice(0, maxToolCallsPerTurn)
+      const truncatedCalls = result.toolCalls.slice(maxToolCallsPerTurn)
       appendAssistant(result.text, calls, false)
-      if (calls.length > maxToolCallsPerTurn) {
-        lastError = `工具调用超限:一轮最多 ${maxToolCallsPerTurn} 次`
+      if (truncatedCalls.length > 0) {
+        // 超限静默删调 → 被删调用全部落显式 rejected 结果(模型可区分"被拦截"与"结果丢失")
+        lastError = `工具调用超限:一轮最多 ${maxToolCallsPerTurn} 次(拦截 ${truncatedCalls.length} 个)`
         emitRaw({ kind: "budget_exceeded", metric: "maxToolCallsPerTurn", used: result.toolCalls.length, limit: maxToolCallsPerTurn })
+        for (const dropped of truncatedCalls) {
+          appendToolError(dropped.id, dropped.name, "rejected", `超出本轮工具调用上限(${maxToolCallsPerTurn}),调用被拦截`)
+        }
       }
 
       let looped = false
       for (const call of calls) {
+        if (looped) {
+          // 循环触发后同批剩余调用不静默丢:显式 rejected,模型可见"被拦截"
+          appendToolError(call.id, call.name, "rejected", "循环已检测,同批剩余调用被拦截")
+          continue
+        }
         toolCalls++
         session.recordToolCall()
         const pattern = behaviorGuard.check(call)
@@ -189,7 +225,7 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
           looped = true
           emitRaw({ kind: "loop_detected", turn: turns, pattern })
           appendToolError(call.id, call.name, "rejected", `检测到循环:${pattern} 已重复超过 ${loopGuard} 次,已停止`)
-          break
+          continue
         }
         const outcome = await action.execute(
           { sessionId: session.sessionId, toolCallId: call.id, name: call.name, args: call.args as Record<string, unknown>, cwd: session.project().self.cwd,
@@ -297,16 +333,33 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
     }
   }
 
-  /** 投影历史体积估算(字符/4 ≈ token);artifact 引用按 size 计入,不因外置而漏算;超模型上下文窗阈值 → 摘要化老消息。 */
+  /** 预算 abort 判定:onBudgetExceeded=abort 且累计 tokens 达 maxContextTokens(estimatedRemaining + cumulative = 上限)。 */
+  function budgetAborted(proj: ContextProjection): boolean {
+    if (proj.resources.onBudgetExceeded !== "abort") return false
+    const limit = proj.self.usage.estimatedRemaining + proj.self.usage.cumulativeTokens
+    return proj.self.usage.cumulativeTokens >= limit
+  }
+
+  /** 投影历史体积估算(estimateTokens:CJK 加权);artifact 引用按 size 计入,不因外置而漏算。
+   * 预算尺子与 session 对齐:effective = min(模型上下文窗, session maxContextTokens),超阈值 → 摘要化老消息。 */
   async function maybeCompact(sessionIn: Session, strategy: CompactStrategy): Promise<void> {
     const projection = sessionIn.project()
     const history = projection.history
     const maxTokens = projection.self.model.contextWindow.maxTokens
+    const usage = projection.self.usage
+    const sessionBudget = usage.estimatedRemaining + usage.cumulativeTokens
+    const effectiveBudget = Math.min(maxTokens, sessionBudget)
     const estimatedTokens = history.reduce(
-      (n, m) => n + m.content.reduce((acc, b) => acc + (b.type === "text" ? b.text.length : b.type === "artifact" && b.size !== undefined ? b.size : 0), 0) / 4,
+      (n, m) =>
+        n +
+        m.content.reduce(
+          (acc, b) =>
+            acc + (b.type === "text" ? estimateTokens(b.text) : b.type === "artifact" && b.size !== undefined ? estimateTokens("x".repeat(b.size)) : 0),
+          0,
+        ),
       0,
     )
-    if (estimatedTokens <= maxTokens * (strategy.thresholdRatio ?? 0.8)) return
+    if (estimatedTokens <= effectiveBudget * (strategy.thresholdRatio ?? 0.8)) return
     const summaryText = await strategy.summarize({ sessionId: sessionIn.sessionId, messages: history, reason: "context-overflow" })
     sessionIn.compact("context-overflow", summaryText)
   }
@@ -337,6 +390,11 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
 
   return {
     async prompt(input) {
+      // busy 守卫(P0-4):双回车 / 并发 POST / cron 叠 turn 一律拒绝,不并行跑同一 session
+      // (两个 runTurn 并行 → turnId/审计交错;要排队请走 steer,或等 idle 后重发)
+      if (running !== null) {
+        return { turns: 0, text: "", toolCalls: 0, aborted: true, error: "会话忙:上一个 turn 未结束(等待 idle 或先 abort)" }
+      }
       const job = (async () => {
         const result = await promptWithGoalContinue(input)
         // drain steer 队列:忙时入队的 steer 在此消费(runTurn 内 epoch 检查已中断主循环)

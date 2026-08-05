@@ -3,7 +3,7 @@
 // 连续失败沿 Model.fallback 降级链下探(model_switched 事件逐级可见)。
 
 import { jsonSchema, streamText, tool, type LanguageModel, type ModelMessage, type ToolChoice, type ToolSet } from "ai"
-import type { ContextProjection, Message, Model, ModelCapabilities, SystemCall } from "@tau/contract"
+import type { ContextProjection, Message, Model, ModelCapabilities, SystemBlock, SystemCall } from "@tau/contract"
 import { resolveAuth } from "./auth.ts"
 import { promptCache, recordCacheHit, type CacheStats } from "./cache.ts"
 import { chatOptionsFor, routeProvider } from "./route.ts"
@@ -20,6 +20,8 @@ export type LlmRequest = {
   thinkingBudgetTokens?: number
   maxOutputTokens?: number
   toolChoice?: "auto" | "none" | "required" | { name: string }
+  /** 事件旁听(complete 的流内事件逐条转发,如 model-switched 供调用方落库/播报)。 */
+  onEvent?: (event: LlmEvent) => void
 }
 
 export type LlmKernelOptions = {
@@ -187,7 +189,10 @@ export function createLlmKernel(options: LlmKernelOptions): LlmKernel {
     stream,
     complete: async (projection, req, signal) => {
       const events: LlmEvent[] = []
-      for await (const event of stream(projection, req, signal)) events.push(event)
+      for await (const event of stream(projection, req, signal)) {
+        events.push(event)
+        req?.onEvent?.(event)
+      }
       const { text, thinking, toolCalls, usage, finishReason, error, aborted } = await collectStream(
         async function* () {
           yield* events
@@ -215,9 +220,64 @@ export function createLlmKernel(options: LlmKernelOptions): LlmKernel {
   }
 }
 
-/** system[] 按 priority 降序拼接(注入防护条款优先级最高,冲突以后置为准的组装在 session)。 */
+/** 投影隐藏字段折叠:kernel 是投影 → 模型输入的唯一转换器,system[] 之外的
+ * self/wake/resources/pendingSyscalls/recent 也必须送达模型(宪法 5/8 于输入面成立)。 */
+export function foldProjectionBlocks(projection: ContextProjection): SystemBlock[] {
+  const out: SystemBlock[] = []
+  const self = projection.self
+
+  out.push({
+    kind: "state",
+    priority: 120,
+    content: `唤醒:${projection.wake.reason}${projection.wake.source ? `(来源:${projection.wake.source})` : ""}`,
+  })
+
+  const selfLines = [
+    `模型:${self.model.id}(${self.model.provider}) 上下文窗 ${self.model.contextWindow.maxTokens} tokens${self.model.contextWindow.maxOutputTokens ? ` 输出上限 ${self.model.contextWindow.maxOutputTokens}` : ""}`,
+    `时钟:${self.clock.wall}`,
+    `用量:turn=${self.usage.turn} 本轮工具调用=${self.usage.toolCallsThisTurn} prompt=${self.usage.promptTokens} completion=${self.usage.completionTokens} 累计=${self.usage.cumulativeTokens} 预计剩余=${self.usage.estimatedRemaining} 成本≈$${self.usage.costUsd}`,
+    `cwd:${self.cwd}`,
+    self.projectRoot ? `projectRoot:${self.projectRoot}` : "",
+    self.git ? `git:${self.git.branch ?? "?"}@${(self.git.commit ?? "?").slice(0, 8)}${self.git.dirty ? " (有未提交改动)" : ""}` : "",
+    `会话身份:${self.session.id}${self.session.title ? `「${self.session.title}」` : ""}${self.session.parentId ? `(父:${self.session.parentId})` : ""}`,
+    `技能目录:${self.skills.dir ?? "(无)"}${self.skills.names.length > 0 ? ` 已加载:[${self.skills.names.join(", ")}]` : ""}`,
+  ]
+  if (self.permissions.length > 0) {
+    selfLines.push("当前权限规则:")
+    for (const rule of self.permissions) {
+      selfLines.push(`- ${rule.scope}「${rule.pattern}」→${rule.rule}${rule.reason ? `(${rule.reason})` : ""}`)
+    }
+  }
+  out.push({
+    kind: "state",
+    priority: 110,
+    content: selfLines.filter((line) => line !== "").join("\n"),
+  })
+
+  out.push({
+    kind: "state",
+    priority: 100,
+    content: `资源:并发上限=${projection.resources.maxConcurrentTurns} 预算 turns=${projection.resources.budget.maxTurns} turnMs=${projection.resources.budget.maxTurnMs} 每轮工具调用=${projection.resources.budget.maxToolCallsPerTurn} 超限=${projection.resources.onBudgetExceeded} workspaceRoots=[${projection.resources.workspaceRoots.join(", ")}]`,
+  })
+
+  if (projection.pendingSyscalls.length > 0) {
+    out.push({
+      kind: "state",
+      priority: 90,
+      content: `挂起询问(必须立即应答):\n${projection.pendingSyscalls.map((p) => `- ${p.toolName}(${p.questionId}) 于 ${p.raisedAt}`).join("\n")}`,
+    })
+  }
+
+  if (projection.recent) {
+    out.push({ kind: "state", priority: 80, content: `最近活动:${projection.recent.kind} ${projection.recent.text}` })
+  }
+
+  return out
+}
+
+/** system[] 折叠 → 按 priority 降序拼接(注入防护条款优先级最高,冲突以后置为准的组装在 session)。 */
 export function assembleSystem(projection: ContextProjection): string {
-  const ordered = [...projection.system].sort((a, b) => b.priority - a.priority)
+  const ordered = [...projection.system, ...foldProjectionBlocks(projection)].sort((a, b) => b.priority - a.priority)
   return ordered.map((block) => block.content).join("\n\n")
 }
 
@@ -239,6 +299,13 @@ export function toAiMessages(history: readonly Message[]): Array<Record<string, 
       } else if (block.type === "image") {
         if (block.url) parts.push({ type: "image", image: block.url })
         else if (block.base64) parts.push({ type: "image", image: `data:image/png;base64,${block.base64}` })
+      } else if (block.type === "thinking") {
+        // 思路链文本渲染:模型接住自己的推理(部分供应商无独立 reasoning 通道,降级为文本保持连续)
+        parts.push({ type: "text", text: `<thinking>\n${block.text}\n</thinking>` })
+      } else if (block.type === "artifact") {
+        // 大载荷引用:正文存 store,模型侧只见引用元数据,按需经 artifact:read 取回
+        const meta = `[artifact:ref ${block.ref}${block.size !== undefined ? ` size=${block.size}` : ""}${block.hash !== undefined ? ` hash=${block.hash}` : ""}]`
+        parts.push({ type: "text", text: meta })
       }
     }
     for (const call of message.toolCalls) {

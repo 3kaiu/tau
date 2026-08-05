@@ -4,6 +4,7 @@
 
 import type { ContextProjection, Model, ModelCapabilities } from "@tau/contract"
 import type { ErrorCode } from "@tau/contract"
+import { assembleSystem, toAiMessages } from "@tau/llm"
 import type { LlmKernel, LlmRequest, LlmCollectResult, LlmEvent, LlmUsage } from "@tau/llm"
 import type { CachePolicy } from "@tau/llm"
 
@@ -35,6 +36,36 @@ const FAUX_MODEL: Model = {
 }
 
 const FAUX_CACHE: CachePolicy = "none"
+
+/** 模型可见面校验:FauxLlm 不 void projection——每次调用都走 kernel 唯一转换器
+ * (assembleSystem + toAiMessages),断言投影字段真实送达模型(审计9 P0-1/P0-2 回归闸)。
+ * 任何"模型侧看不见"的回归在此即 eval 失败,不再被夹具复刻掩盖。 */
+function assertModelVisible(projection: ContextProjection): void {
+  const system = assembleSystem(projection)
+  const messages = toAiMessages(projection.history)
+    .map((message) => JSON.stringify(message))
+    .join("\n")
+
+  if (!system.includes(`唤醒:${projection.wake.reason}`)) {
+    throw new Error(`FauxLlm: 投影 wake 未送达模型(system 缺唤醒块,wake=${projection.wake.reason})`)
+  }
+  if (!system.includes(`模型:${projection.self.model.id}`)) {
+    throw new Error(`FauxLlm: 投影 self 未送达模型(system 缺自省块,model=${projection.self.model.id})`)
+  }
+  if (!system.includes(`cwd:${projection.self.cwd}`)) {
+    throw new Error("FauxLlm: 投影 self.cwd 未送达模型(system 缺 cwd)")
+  }
+  for (const message of projection.history) {
+    for (const block of message.content) {
+      if (block.type === "artifact" && !messages.includes(`[artifact:ref ${block.ref}`)) {
+        throw new Error(`FauxLlm: artifact 引用块未渲染进模型输入(ref=${block.ref})`)
+      }
+      if (block.type === "thinking" && !messages.includes("<thinking>")) {
+        throw new Error("FauxLlm: thinking 块未渲染进模型输入")
+      }
+    }
+  }
+}
 
 export function createFauxLlm(script: FauxScript): LlmKernel {
   const model = script.model ?? FAUX_MODEL
@@ -71,7 +102,7 @@ export function createFauxLlm(script: FauxScript): LlmKernel {
   return {
     cacheStats: () => ({ calls: 0, cachedTokenCandidates: 0, cacheReadTokens: 0 }),
     async* stream(projection: ContextProjection, req?: LlmRequest, signal?: AbortSignal): AsyncGenerator<LlmEvent> {
-      void projection
+      assertModelVisible(projection)
       void req
       if (signal?.aborted) {
         yield { type: "aborted" }
@@ -109,7 +140,7 @@ export function createFauxLlm(script: FauxScript): LlmKernel {
     },
 
     async complete(projection: ContextProjection, req?: LlmRequest, signal?: AbortSignal): Promise<LlmCollectResult> {
-      void projection
+      assertModelVisible(projection)
       void req
       if (signal?.aborted) {
         return { text: "", thinking: "", toolCalls: [], usage: undefined, finishReason: "aborted", error: undefined, aborted: true }

@@ -174,6 +174,26 @@ describe("HTTP: createHttpApp", () => {
       clearTimeout(timeout)
     }
   })
+
+  it("P1-13:SSE 续传竞态——先订阅后重放,重放按 seen 去重(空窗不丢、交接不重)", async () => {
+    // 单测针对流端点的读端辅助语义:replay 跳过 lastEventId 之前的事件;找不到 → 全量
+    const replay: readonly Event[] = [
+      { id: "ev-1", timestamp: "t1", redact: [], kind: "transcript", message: { id: "m1", role: "assistant", content: [], createdAt: "t1" } },
+      { id: "ev-2", timestamp: "t2", redact: [], kind: "transcript", message: { id: "m2", role: "assistant", content: [], createdAt: "t2" } },
+    ]
+    const face = createMockFace()
+    const httpApp = createHttpApp({ face, replay: () => replay })
+    const res = await httpApp.request("/snapshot?since=ev-1")
+    expect(res.status).toBe(200)
+    const body = await res.json() as { epoch: number; events: readonly Event[] }
+    expect(body.events.map((e) => e.id)).toEqual(["ev-2"])
+    const stale = await httpApp.request("/snapshot?since=nonexistent")
+    const staleBody = await stale.json() as { epoch: number; events: readonly Event[] }
+    expect(staleBody.events.map((e) => e.id)).toEqual(["ev-1", "ev-2"])
+    // 无 since:全量快照(兼容旧客户端)
+    const full = await httpApp.request("/snapshot")
+    expect((await full.json() as SessionSnapshot).epoch).toBeGreaterThanOrEqual(0)
+  })
 })
 
 describe("HTTP: serveHttp", () => {

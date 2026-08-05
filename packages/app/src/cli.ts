@@ -1,7 +1,7 @@
 // @tau/app - cli.ts:参数解析 + 子命令路由。
 // print 模式(`tau -p`)、交互 TUI 模式(`tau`)、serve、acp、doctor、eval。
 
-import { mkdirSync } from "node:fs"
+import { existsSync, mkdirSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { homedir } from "node:os"
 import { applyRemoteCatalog, composeAsync } from "./compose.ts"
@@ -18,6 +18,8 @@ import {
   type ScheduleEntry,
 } from "@tau/orchestrate"
 import { CommandSchema, ConfigSchema, EventSchema, coerceConfigValue, formatConfigError, goal as makeGoal, isConfigKey, type Message, type SessionSnapshot } from "@tau/contract"
+
+const KNOWN_CONFIG_KEYS = ["model", "maxContextTokens", "turnBudget", "toolTierRules", "capabilityDefaults", "compaction", "thinking"].join(", ")
 import { version } from "./index.ts"
 
 const HELP = `tau ${version} - agent 运行时
@@ -178,11 +180,19 @@ function getOptValue(args: string[], flag: string): string | undefined {
   return v !== undefined && !v.startsWith("-") ? v : undefined
 }
 
-/** 直接打开 store(治理/配置只读路径,不构造完整 runtime,避免副作用事件;不拿写锁)。 */
+/** 直接打开 store(治理/配置只读路径,不构造完整 runtime,避免副作用事件;不拿写锁)。
+ * 库不存在 → 空 memory(只读观测绝不建库,`config get` 未初始化时退出 1 而非崩溃)。 */
 function openStore(storePath?: string): Store {
   if (storePath === undefined) return createMemoryStore()
-  mkdirSync(dirname(storePath), { recursive: true })
+  if (!existsSync(storePath)) return createMemoryStore()
   return createStore("sqlite", storePath, { readonly: true })
+}
+
+/** 写路径打开 store(治理写操作:resume/archive/delete):拿写锁 + 全量 pragma + migrate,活会话并发时明确错误而非双写。 */
+function openWriteStore(storePath?: string): Store {
+  if (storePath === undefined) return createMemoryStore()
+  mkdirSync(dirname(storePath), { recursive: true })
+  return createStore("sqlite", storePath)
 }
 
 /** compose 的通用选项转发(含 --session)。 */
@@ -543,7 +553,8 @@ async function sessionsMode(args: string[]): Promise<number> {
 
   if (action === "resume" || action === "archive" || action === "delete") {
     if (target === undefined) return usage(`tau sessions ${action} <id>`)
-    const store = openStore(opts.storePath)
+    // 治理写操作必须真写:写锁连接(活会话并发 → 明确错误,不双写)
+    const store = openWriteStore(opts.storePath)
     if (store.sessions.get(target) === null) {
       console.error(`tau sessions:会话 "${target}" 不在注册表 ${NO_STORE_HINT}`)
       store.close?.()
@@ -604,7 +615,8 @@ function configMode(args: string[]): number {
   const opts = parseCommonOpts(args)
   const [action = "list", key, value] = positionals(args)
   const path = opts.storePath ?? defaultConfigStore()
-  const store = openStore(path)
+  // 写操作(set/unset)拿写锁;读操作(list/get)只读
+  const store = action === "set" || action === "unset" ? openWriteStore(path) : openStore(path)
 
   try {
     if (action === "list") {
@@ -647,6 +659,10 @@ function configMode(args: string[]): number {
           console.error(formatConfigError(check.error, { [key]: value }))
           return 2
         }
+      } else {
+        // 未知键不静默落盘:契约未知 = 拼装点不消费,落盘即僵尸配置(审计9 P1-15)
+        console.error(`tau config:未知配置键 "${key}"(合法键: ${KNOWN_CONFIG_KEYS})`)
+        return 2
       }
       store.kv.set(CONFIG_PREFIX + key, value)
       console.log(`tau config:${key} = ${value} (${path})`)
@@ -673,7 +689,8 @@ async function scheduleMode(args: string[]): Promise<number> {
   const opts = parseCommonOpts(args)
   const [action = "list", a1, a2] = positionals(args)
   const path = opts.storePath ?? defaultConfigStore()
-  const store = openStore(path)
+  // 写操作(add/rm/run:markRan + turn 落库)拿写锁;读操作(list)只读
+  const store = action === "add" || action === "rm" || action === "run" ? openWriteStore(path) : openStore(path)
 
   try {
     if (action === "list") {
@@ -740,6 +757,8 @@ async function scheduleMode(args: string[]): Promise<number> {
       }
       let failed = 0
       for (const e of due) {
+        // markRan 前置:先记账"已到点执行",再发布 turn——上一轮挂起时下一轮不再重复触发(审计9 P1-11)
+        markRan(store, e.id, now.toISOString())
         // 目标经 session.setGoal 进投影(模型感知),再以 prompt 唤醒——不旁路拼 Context
         const runtime = await composeAsync(composeOpts({ ...opts, sessionId: e.sessionId }, { store }))
         runtime.scheduler.goals.set(makeGoal(e.id, e.goalText))
@@ -748,7 +767,6 @@ async function scheduleMode(args: string[]): Promise<number> {
           sender: { clientId: "cron", kind: "cli" },
           text: e.goalText,
         })
-        markRan(store, e.id, now.toISOString())
         if (result.accepted === false) {
           console.error(`tau schedule:${e.id} 未被接受 — ${result.detail}`)
           failed += 1

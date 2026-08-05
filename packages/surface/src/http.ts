@@ -17,7 +17,17 @@ export function createHttpApp(deps: HttpDeps): Hono {
 
   app.get("/health", (c) => c.json({ ok: true, version: "0.0.1" }))
 
-  app.get("/snapshot", (c) => c.json(deps.face.snapshot()))
+  app.get("/snapshot", (c) => {
+    // 增量对齐(P1-13):?since=<eventId> → { epoch, events }(since 之后的事件;找不到 → 全量)
+    const since = c.req.query("since")
+    if (since !== undefined && deps.replay !== undefined) {
+      const all = deps.replay()
+      const idx = all.findIndex((e) => e.id === since)
+      const events = idx === -1 ? all : all.slice(idx + 1)
+      return c.json({ epoch: deps.face.snapshot().epoch, events })
+    }
+    return c.json(deps.face.snapshot())
+  })
 
   app.post("/command", async (c) => {
     const body = await c.req.json<Partial<Command>>()
@@ -48,35 +58,43 @@ export function createHttpApp(deps: HttpDeps): Hono {
         if (matchesFilter(event, filter)) await stream.writeSSE({ data: JSON.stringify(event), id: event.id })
       }
 
-      // Resume: 重放 missed events
-      if (deps.replay !== undefined && lastEventId !== undefined) {
-        const all = deps.replay()
-        let found = false
-        for (const event of all) {
-          if (found) {
-            await emit(event)
-          }
-          if (event.id === lastEventId) found = true
-        }
-        // If lastEventId not found, send all (full sync)
-        if (!found) {
-          for (const event of all) {
-            await emit(event)
-          }
-        }
-      } else if (deps.replay !== undefined) {
-        // No resume: send all existing events
-        for (const event of deps.replay()) {
-          await emit(event)
+      // 先订阅后重放:订阅建立前的空窗事件先进队列(不丢),重放按 seen 去重(不重)。
+      // 串行 drain 保证 SSE 写序 = 事件 id 单调序。
+      const abortController = new AbortController()
+      const seen = new Set<string>()
+      let buffer: Event[] = []
+      let draining: Promise<void> | null = null
+      const push = (event: Event): void => {
+        if (abortController.signal.aborted) return
+        buffer.push(event)
+        if (draining === null) {
+          draining = (async () => {
+            while (buffer.length > 0) {
+              const next = buffer.shift()!
+              await emit(next)
+            }
+            draining = null
+          })()
         }
       }
-
-      // Subscribe to new events
-      const abortController = new AbortController()
       const unsubscribe = deps.face.subscribe(filter, (event: Event) => {
-        if (abortController.signal.aborted) return
-        void emit(event)
+        seen.add(event.id)
+        push(event)
       })
+
+      // 重放:Last-Event-ID 之后的事件(找不到 → 全量同步);已实时收到的跳过
+      if (deps.replay !== undefined) {
+        const all = deps.replay()
+        let start = 0
+        if (lastEventId !== undefined) {
+          const idx = all.findIndex((e) => e.id === lastEventId)
+          start = idx === -1 ? 0 : idx + 1
+        }
+        for (let i = start; i < all.length; i++) {
+          if (!seen.has(all[i]!.id)) push(all[i]!)
+        }
+      }
+      await draining
 
       // Heartbeat (every 30s)
       const heartbeat = setInterval(() => {

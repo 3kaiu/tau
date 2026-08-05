@@ -129,13 +129,12 @@ describe("tau config(配置)", () => {
     expect(stdout()).toBe("gpt-5")
 
     out = []
-    await runCli(["config", "set", "ui.theme", "dark", "--store", dbPath])
+    // 未知键不静默落盘(契约未知 = 拼装点不消费,审计9 P1-15)
+    expect(await runCli(["config", "set", "ui.theme", "dark", "--store", dbPath])).toBe(2)
+    expect(stderr()).toContain("未知配置键")
     out = []
     await runCli(["config", "list", "--json", "--store", dbPath])
-    expect(JSON.parse(stdout())).toEqual({ model: "gpt-5", "ui.theme": "dark" })
-
-    out = []
-    expect(await runCli(["config", "unset", "ui.theme", "--store", dbPath])).toBe(0)
+    expect(JSON.parse(stdout())).toEqual({ model: "gpt-5" })
     out = []
     await runCli(["config", "list", "--json", "--store", dbPath])
     expect(JSON.parse(stdout())).toEqual({ model: "gpt-5" })

@@ -3,14 +3,35 @@
 // ask_user 挂起经 questionId 恢复;detach 后台任务可轮询/取消;危险命令强制询问(不走静默允许)。
 
 import type { Store } from "@tau/store"
-import { isDangerousCommand, toolError } from "@tau/contract"
+import { createEventIdGenerator, isDangerousCommand, toolError } from "@tau/contract"
 import type { Event, ToolError, ToolEvent, ToolResult } from "@tau/contract"
 import { ToolRegistry } from "./registry.ts"
 import { CapabilityGate } from "./capability.ts"
 import { recordAudit } from "./audit.ts"
 import { createHookRegistry, type Hook, type HookContext } from "./hooks.ts"
 
+const gen = createEventIdGenerator()
+
+/** 权限决议竞速:回调/挂起二选一,超时或中断 → undefined(调用方按拒绝收尾)。
+ * 回调后至 Promise 落定期间可被多个调用方等待;结果只取首达者。 */
+function raceApproval(promise: Promise<boolean>, timeoutMs: number, signal?: AbortSignal): Promise<boolean | undefined> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(undefined), timeoutMs)
+    const onAbort = () => {
+      clearTimeout(timer)
+      resolve(undefined)
+    }
+    signal?.addEventListener("abort", onAbort, { once: true })
+    promise.then((value) => {
+      clearTimeout(timer)
+      signal?.removeEventListener("abort", onAbort)
+      resolve(value)
+    })
+  })
+}
+
 const SECRET_PATTERNS: readonly RegExp[] = [
+  /(^|\s)(curl|wget)\b[^\n]*(-u\s+\S+|--user\s+\S+)/,
   /-----BEGIN [A-Z ]+PRIVATE KEY-----/,
   /(?:API|SECRET|TOKEN|KEY|PASSWORD)\s*=\s*["']?[A-Za-z0-9_-]{16,}/i,
 ]
@@ -230,7 +251,13 @@ export class ActionPlane {
     emit({ kind: "permission", requestId, toolName: req.name, summary, state: "requested" })
 
     if (this.opts.onPermission !== undefined) {
-      const approved = await this.opts.onPermission({ toolCallId: req.toolCallId, toolName: req.name, summary })
+      // 回调路径同样受超时约束(P1-2):无人应答不得永久挂起,超时 = 拒绝(与挂起路径同语义)
+      const approved = await raceApproval(this.opts.onPermission({ toolCallId: req.toolCallId, toolName: req.name, summary }), this.opts.permissionTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS, req.signal)
+      if (approved === undefined) {
+        emit({ kind: "permission", requestId, toolName: req.name, summary, state: "timeout" })
+        recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: summary, outcome: "rejected", durationMs: Date.now() - started, turnId: req.turnId })
+        return false
+      }
       emit({ kind: "permission", requestId, toolName: req.name, summary, state: approved ? "granted" : "denied" })
       recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: summary, outcome: approved ? "approved" : "rejected", durationMs: Date.now() - started, turnId: req.turnId })
       return approved
@@ -269,7 +296,7 @@ export class ActionPlane {
   async *executeStream(req: ExecuteRequest, opts: { timeoutMs?: number; bypassQueue?: boolean } = {}): AsyncGenerator<ToolEvent, void, void> {
     const started = Date.now()
     const emit = (event: EventInput): Event => {
-      const full = { id: crypto.randomUUID(), timestamp: new Date().toISOString(), redact: [], ...event } as Event
+      const full = { id: gen(), timestamp: new Date().toISOString(), redact: [], ...event } as Event
       this.opts.onEvent?.(full)
       return full
     }
@@ -284,7 +311,7 @@ export class ActionPlane {
 
     // 危险命令强制询问:命中模式表无条件升级为 ask(含 autoApprove 场景,静默放行 = 违宪 16)
     const forcedAsk = req.name === "bash" && typeof req.args.command === "string" && isDangerousCommand(req.args.command)
-    const decision = forcedAsk ? ({ rule: "ask" } as const) : this.gate.decide(req.name, syscall.dangerous)
+    const decision = forcedAsk ? ({ rule: "ask" } as const) : this.gate.decide(req.name, syscall.dangerous, syscall.defaultRule?.pattern)
     if (decision.rule === "deny") {
       const error = toolError("permission_denied", `${req.name}:${decision.reason}`)
       yield emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "failed", args: req.args, error }) as ToolEvent
@@ -389,7 +416,7 @@ export class ActionPlane {
   }
 
   private emitTool(event: EventInput): void {
-    this.opts.onEvent?.({ id: crypto.randomUUID(), timestamp: new Date().toISOString(), redact: [], ...event } as Event)
+    this.opts.onEvent?.({ id: gen(), timestamp: new Date().toISOString(), redact: [], ...event } as Event)
   }
 
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {

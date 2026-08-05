@@ -6,7 +6,7 @@ export const version = "0.0.1"
 
 export { createLlmKernel } from "./kernel.ts"
 export type { LlmKernel, LlmKernelOptions, LlmRequest } from "./kernel.ts"
-export { assembleSystem, toAiMessages, toToolSet } from "./kernel.ts"
+export { assembleSystem, foldProjectionBlocks, toAiMessages, toToolSet } from "./kernel.ts"
 export type { LlmEvent, LlmUsage, LlmCollectResult } from "./stream.ts"
 export { normalizeStream, collectStream, errorCodeOf } from "./stream.ts"
 export { promptCache, recordCacheHit, cacheHitRate } from "./cache.ts"

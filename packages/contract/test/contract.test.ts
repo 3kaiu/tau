@@ -32,6 +32,7 @@ import {
   parseMergedConfig,
   recentActivityFrom,
   redactFields,
+  estimateTokens,
   toolError,
   toolResult,
   validate,
@@ -433,6 +434,11 @@ describe("audit8 六 schema + 事件 id 生成器", () => {
     expect(() => parseMergedConfig({ toolTierRules: JSON.stringify({ defaultTier: "T9" }) })).toThrow(/配置不合法/)
   })
 
+  it("P1-15:未知配置键拒绝(不静默剥掉)", () => {
+    expect(() => parseMergedConfig({ uiTheme: "dark" })).toThrow(/配置不合法/)
+    expect(() => parseMergedConfig({ maxContextTokens: "8000", bogusKey: "1" })).toThrow(/配置不合法/)
+  })
+
   it("coerceConfigValue:对象/整型强转,未知键与坏串原样透传", () => {
     expect(coerceConfigValue("maxContextTokens", "8000")).toBe(8000)
     expect(coerceConfigValue("turnBudget", '{"perTurnMax":1}')).toEqual({ perTurnMax: 1 })
@@ -453,5 +459,20 @@ describe("audit8 六 schema + 事件 id 生成器", () => {
     const other = createEventIdGenerator()
     expect(other()).not.toBe(other())
     expect(other().length).toBeGreaterThan(10)
+  })
+})
+
+describe("estimateTokens:CJK 加权估算", () => {
+  it("ASCII 4 字符 ≈ 1 token", () => {
+    expect(estimateTokens("abcd")).toBeCloseTo(1, 5)
+    expect(estimateTokens("a".repeat(400))).toBeCloseTo(100, 5)
+  })
+  it("CJK 1 字符 ≈ 1 token(不再 4 倍低估)", () => {
+    expect(estimateTokens("中文")).toBe(2)
+    expect(estimateTokens("中文测试".repeat(100))).toBe(400)
+  })
+  it("混合:中文 + ASCII 加权求和", () => {
+    const mixed = "hello 世界 world 你好"
+    expect(estimateTokens(mixed)).toBeCloseTo(estimateTokens("hello  world ") + 4, 5)
   })
 })

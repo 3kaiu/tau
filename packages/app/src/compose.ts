@@ -11,6 +11,7 @@ import { createCommandFace, type CommandFace } from "@tau/surface"
 import { createEnhancer, type Enhancer } from "@tau/enhance"
 import { SystemCallSchema, parseMergedConfig, type Config, type Event, type Model } from "@tau/contract"
 import { loadConfigFromStore } from "./config.ts"
+import { gitInfo } from "./git.ts"
 import { registerMcpServers, type McpServerConfig } from "./mcp.ts"
 
 export type ComposeOptions = {
@@ -62,6 +63,11 @@ type Prep = {
   /** 合并后的配置(state.kv 装载基线 + options.config 程序化覆写)。 */
   config: Config | null
   mcpRuntime: { dispose?: () => Promise<void> }
+  /** 事件桥锚点(唯一拼装点接线:session/action 事件在 finishRuntime 就绪前暂存,就绪后分发)。 */
+  bridges: {
+    scheduler: ((event: Event) => void) | null
+    face: ((event: Event) => void) | null
+  }
 }
 
 /** 同步拼装(不注册 MCP;测试/诊断用)。MCP 场景走 composeAsync。 */
@@ -108,13 +114,29 @@ function prepare(options: ComposeOptions): Prep {
   const store = options.store ?? (options.storePath !== undefined ? createStore("sqlite", options.storePath) : createMemoryStore())
   const sessionId = options.sessionId ?? "main"
   const catalog = options.catalog ?? defaultCatalog()
-  const modelId = options.model ?? catalog[0]?.id ?? "default"
+  // 配置提前解析:model 键参与模型选择(config.model 为缺省,options.model 显式优先)
+  const config = resolveConfig(options)
+  const modelId = options.model ?? config?.model ?? catalog[0]?.id ?? "default"
+  const bridges: Prep["bridges"] = { scheduler: null, face: null }
 
   // enhancer 装载 skills + AGENTS.md -> 投影块
   const enhancer = options.skipEnhancer === true ? null : createEnhancer({ cwd, store })
   const enhancerApplied = enhancer?.apply(sessionId) ?? { systemBlocks: [], skillNames: [], skillsDir: "" }
 
-  const action = createActionPlane(store, { workspaceRoots, autoApprove: options.autoApprove ?? false })
+  const action = createActionPlane(store, {
+    workspaceRoots,
+    autoApprove: options.autoApprove ?? false,
+    // 事件桥:tool/permission 事件统一汇入(face 分发 + scheduler 转发),不再断链
+    onEvent: (event) => {
+      bridges.scheduler?.(event)
+      bridges.face?.(event)
+    },
+  })
+
+  // capabilityDefaults 消费方(config 三态表 merge 进 gate;与 syscall defaultRule 同表后置优先)
+  if (config?.capabilityDefaults !== undefined && config.capabilityDefaults.length > 0) {
+    for (const rule of config.capabilityDefaults) action.gate.addRule(rule)
+  }
 
   // 注册 syscall + 规则进 gate(声明 defaultRule 真实生效;否则危险工具无规则直接 deny)
   const registerSyscall = (syscall: import("@tau/contract").SystemCall, exec: Parameters<ActionPlane["registerExecutor"]>[1]) => {
@@ -224,6 +246,26 @@ function prepare(options: ComposeOptions): Prep {
     )
   }
 
+  // artifact:list syscall -- 枚举会话已外置的 artifact(executor 在 finishRuntime 闭包就绪后覆盖)
+  {
+    const artifactListSchema = SystemCallSchema.parse({
+      name: "artifact:list",
+      description: "枚举本会话已外置的 artifact 引用(ref/size/hash/mime;正文经 artifact:read 按 ref 取回)。",
+      parameters: { type: "object", properties: {}, required: [] },
+      tier: "T0",
+      dangerous: false,
+      defaultRule: { pattern: "artifact:list", rule: "allow", scope: "tool" },
+    })
+    registerSyscall(artifactListSchema, async () => ({
+      exitCode: 1,
+      stdout: "artifact:list 执行器未就绪(compose 装配未完成)",
+      stderr: null,
+      truncated: false,
+      totalPages: 1,
+      page: 0,
+    }))
+  }
+
   // subagent:run syscall -- 多代理委派(元数据先注册进投影;executor 在 finishRuntime 闭包就绪后覆盖)
   {
     const subagentSchema = SystemCallSchema.parse({
@@ -266,8 +308,9 @@ function prepare(options: ComposeOptions): Prep {
     enhancer,
     enhancerApplied,
     action,
-    config: resolveConfig(options),
+    config,
     mcpRuntime: {},
+    bridges,
   }
 }
 
@@ -284,9 +327,8 @@ function resolveConfig(options: ComposeOptions): Config | null {
 }
 
 function finishRuntime(prep: Prep, mcpEvents: readonly Event[]): TauRuntime {
-  const { cwd, workspaceRoots, store, sessionId, catalog, modelId, llm, schedulerOptions, enhancer, enhancerApplied, action, config, mcpRuntime } = prep
-
-  let schedulerBridge: ((event: Event) => void) | null = null
+  const { cwd, workspaceRoots, store, sessionId, catalog, modelId, llm, schedulerOptions, enhancer, enhancerApplied, action, config, mcpRuntime, bridges } = prep
+  const git = gitInfo(cwd)
 
   const sessionModel = catalog.find((m) => m.id === modelId)
   const session = createSession({
@@ -297,11 +339,21 @@ function finishRuntime(prep: Prep, mcpEvents: readonly Event[]): TauRuntime {
     tools: action.registry.all(),
     extraSystemBlocks: enhancerApplied.systemBlocks,
     skills: { dir: enhancerApplied.skillsDir, names: enhancerApplied.skillNames },
+    // 自省块缺料补齐(P0-2):模型必须看到真实权限规则与 git 现场,而非空壳
+    permissions: action.gate.rules,
+    ...(git !== null ? { projectRoot: git.projectRoot, git: git.git } : {}),
     ...(sessionModel !== undefined ? { model: sessionModel } : {}),
     ...(config?.maxContextTokens !== undefined ? { maxContextTokens: config.maxContextTokens } : {}),
+    // turnBudget 消费方:session 投影 resources.budget(与 scheduler 预算同源)
+    ...(config?.turnBudget !== undefined ? { budget: config.turnBudget } : {}),
     ...(config?.toolTierRules !== undefined ? { toolTierRules: config.toolTierRules } : {}),
     ...(config?.compaction !== undefined ? { compactionKeepRecent: config.compaction.keepRecent } : {}),
-    onEvent: (event) => schedulerBridge?.(event),
+    // thinking 消费方:策略缺省 32KB,与 session 截断缺省一致(显式覆盖经 config.thinking.maxBytes)
+    ...(config?.thinking !== undefined ? { maxThinkingBytes: config.thinking.maxBytes } : {}),
+    onEvent: (event) => {
+      bridges.scheduler?.(event)
+      bridges.face?.(event)
+    },
   })
 
   const kernel =
@@ -315,6 +367,14 @@ function finishRuntime(prep: Prep, mcpEvents: readonly Event[]): TauRuntime {
     { llm: kernel, session, action },
     {
       ...(modelId !== "default" ? { model: modelId } : {}),
+      // turnBudget 消费方:config 键映射到调度器预算(显式 schedulerOptions 仍优先)
+      ...(config?.turnBudget !== undefined
+        ? {
+            maxTurns: config.turnBudget.maxTurns,
+            maxTurnMs: config.turnBudget.maxTurnMs,
+            maxToolCallsPerTurn: config.turnBudget.maxToolCallsPerTurn,
+          }
+        : {}),
       ...(enhancer !== null
         ? {
             compact: {
@@ -326,7 +386,34 @@ function finishRuntime(prep: Prep, mcpEvents: readonly Event[]): TauRuntime {
       ...schedulerOptions,
     },
   )
-  schedulerBridge = (event) => scheduler.notify(event)
+  bridges.scheduler = (event) => scheduler.notify(event)
+
+  // 调度器自产事件(recent 种类:retry/interrupted/model_switched)→ 事件日志持久化。
+  // 只持久化 session 不自产的种类,防双写(compression/recovery 由 session 自持)。
+  scheduler.subscribe((event) => {
+    if (event.kind === "retry" || event.kind === "interrupted" || event.kind === "model_switched") {
+      store.events.append(sessionId, event)
+    }
+  })
+
+  // retrieve 接历史检索(P0-3):production 经 session.retrieve(活跃历史 + 归档全文,FTS5),
+  // 模型可对压缩/截断内容回源——ResultPageStore 仅保留给 result:page 续读
+  action.registerExecutor("retrieve", async (req) => {
+    const query = String(req.args.query ?? "")
+    if (query === "") return { exitCode: 1, stdout: "retrieve:缺 query 参数", stderr: null, truncated: false, totalPages: 1, page: 0 }
+    const { results, total } = session.retrieve({ query, limit: 20 })
+    if (total === 0) return { exitCode: 0, stdout: `无命中:${query}`, stderr: null, truncated: false, totalPages: 1, page: 0 }
+    const lines = results.map((r) => `[${r.source} ${r.id}] ${r.excerpt.replace(/\n/g, " ")}`)
+    return { exitCode: 0, stdout: `${results.length}/${total} 命中\n${lines.join("\n")}`, stderr: null, truncated: false, totalPages: 1, page: 0 }
+  })
+
+  // artifact:list executor 就绪(枚举会话 artifact 引用,正文仍走 artifact:read)
+  action.registerExecutor("artifact:list", async () => {
+    const metas = session.listArtifacts()
+    if (metas.length === 0) return { exitCode: 0, stdout: "0 个 artifact", stderr: null, truncated: false, totalPages: 1, page: 0 }
+    const lines = metas.map((m) => `- ${m.ref} size=${m.size} hash=${m.hash.slice(0, 8)}${m.mime !== undefined ? ` mime=${m.mime}` : ""}`)
+    return { exitCode: 0, stdout: `${metas.length} 个 artifact\n${lines.join("\n")}`, stderr: null, truncated: false, totalPages: 1, page: 0 }
+  })
 
   // subagent:run executor 就绪(闭包 kernel/session;多代理委派经 orchestrate 唯一出口)
   action.registerExecutor("subagent:run", async (req) => {
@@ -352,10 +439,14 @@ function finishRuntime(prep: Prep, mcpEvents: readonly Event[]): TauRuntime {
     return { exitCode: result.status === "completed" ? 0 : 1, stdout: summary, stderr: null, truncated: false, totalPages: 1, page: 0 }
   })
 
-  // 补发 MCP 注册事件
-  for (const ev of mcpEvents) schedulerBridge(ev)
+  // 补发 MCP 注册事件(scheduler 订阅者 + face 全量可见)
+  for (const ev of mcpEvents) {
+    bridges.scheduler?.(ev)
+    bridges.face?.(ev)
+  }
 
   const face = createCommandFace({ orchestrate: scheduler, session, action })
+  bridges.face = (event) => face.notify(event)
 
   return { store, session, llm: kernel, action, scheduler, face, enhancer, mcpDispose: async () => mcpRuntime.dispose?.() }
 }

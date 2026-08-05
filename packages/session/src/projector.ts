@@ -22,6 +22,9 @@ import {
 } from "@tau/contract"
 import type { UsageState } from "./snapshot.ts"
 
+/** 摘要消息 id 列表在"历史已压缩"提示中的最大展示数(超出只列最近几条 + 总数,防投影无限变长)。 */
+const SUMMARY_IDS_SHOWN = 8
+
 export type ProjectorOptions = {
   sessionId: string
   /** 会话身份(契约 self.session):title 供 UI 标题,parentId 标识子会话来源。 */
@@ -123,10 +126,11 @@ function assembleBlocks(opts: ProjectorOptions, input: ProjectorInput): SystemBl
     ...(opts.extraSystemBlocks ?? []),
   ]
   if (input.summaryIds.length > 0) {
+    const shown = input.summaryIds.length <= SUMMARY_IDS_SHOWN ? input.summaryIds.join(", ") : `${input.summaryIds.slice(-SUMMARY_IDS_SHOWN).join(", ")}, …(共 ${input.summaryIds.length} 条)`
     blocks.push({
       kind: "context",
       priority: 10,
-      content: `历史已压缩:${input.summaryIds.length} 条消息摘要化(可经 retrieve 工具取回;摘要消息 id: ${input.summaryIds.join(", ")})`,
+      content: `历史已压缩:${input.summaryIds.length} 条消息摘要化(可经 retrieve 工具取回;摘要消息 id: ${shown})`,
     })
   }
   if (input.budgetAlarm) {

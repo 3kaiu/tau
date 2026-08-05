@@ -274,7 +274,7 @@ export function createActionPlane(store: Store, opts: ActionPlaneOptions = {}): 
     {
       syscall: {
         name: "retrieve",
-        description: "检索本会话已产生的工具输出(截断暂存区全文),子串过滤。",
+        description: "检索本会话历史与归档全文(压缩/截断内容可回源),子串过滤。",
         parameters: {
           type: "object",
           properties: {

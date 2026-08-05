@@ -22,6 +22,7 @@ export * from "./goal.ts"
 export * from "./session.ts"
 export * from "./config.ts"
 export * from "./invariant.ts"
+export * from "./tokens.ts"
 
 /** 契约 schema 注册表:模块加载时编译一次,热路径校验复用同一实例(zod 内部缓存)。 */
 export const contractSchemas = {

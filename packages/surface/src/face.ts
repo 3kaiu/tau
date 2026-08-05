@@ -1,7 +1,7 @@
 // @tau/surface - face.ts:CommandFace 聚合(发布/订阅/快照)。
 // 命令面无状态:一切状态在 session;只发布与观察,不生成内容。
 
-import type { Command, Event, InputAcceptedEvent, SessionSnapshot } from "@tau/contract"
+import { createEventIdGenerator, type Command, type Event, type InputAcceptedEvent, type SessionSnapshot } from "@tau/contract"
 import type { Scheduler } from "@tau/orchestrate"
 import type { Session } from "@tau/session"
 import type { ActionPlane } from "@tau/action"
@@ -68,9 +68,12 @@ export interface CommandFace {
   subscribe(listener: (event: Event) => void): () => void
   subscribe(filter: EventFilter, listener: (event: Event) => void): () => void
   snapshot(): SessionSnapshot
+  /** 外部事件汇入(compose 桥):session/action/scheduler 产出的全量事件经 face 统一分发。
+   * face 自身不生成事件(publish 的 input_accepted 除外);订阅者只依赖这一个读端。 */
+  notify(event: Event): void
 }
 
-const uuid = () => crypto.randomUUID()
+const uuid = createEventIdGenerator()
 
 export function createCommandFace(deps: FaceDeps): CommandFace {
   const listeners = new Set<(event: Event) => void>()
@@ -149,5 +152,8 @@ export function createCommandFace(deps: FaceDeps): CommandFace {
       return () => listeners.delete(filtered)
     },
     snapshot: () => deps.session.snapshot(),
+    notify(event) {
+      emit(event)
+    },
   }
 }

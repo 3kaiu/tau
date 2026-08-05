@@ -69,7 +69,27 @@ describe("assembleSystem", () => {
       { kind: "injection", priority: INJECTION_PRIORITY, content: "guard" },
       { kind: "context", priority: 5, content: "ctx" },
     ]
-    expect(assembleSystem(p)).toBe("guard\n\nctx\n\npolicy")
+    const out = assembleSystem(p)
+    expect(out).toContain("policy")
+    expect(out).toContain("ctx")
+    expect(out.indexOf("guard")).toBeLessThan(out.indexOf("ctx"))
+    expect(out.indexOf("ctx")).toBeLessThan(out.indexOf("policy"))
+  })
+
+  it("折叠 self/wake/resources/pendingSyscalls/recent 送达模型(宪法5/8 输入面)", () => {
+    const p = projection()
+    p.pendingSyscalls = [{ questionId: "q1", toolCallId: "c1", toolName: "bash", raisedAt: "t" }]
+    p.recent = { kind: "retry", text: "retry after 429 (attempt 2)", eventId: "e1" }
+    p.self.permissions = [{ pattern: "read", rule: "allow", scope: "path" }]
+    const out = assembleSystem(p)
+    expect(out).toContain("唤醒:prompt(来源:test)")
+    expect(out).toContain("模型:gpt-5-mini(openai)")
+    expect(out).toContain("cwd:/tmp")
+    expect(out).toContain("超限=ask")
+    expect(out).toContain("挂起询问")
+    expect(out).toContain("bash(q1)")
+    expect(out).toContain("最近活动:retry retry after 429 (attempt 2)")
+    expect(out).toContain("「read」→allow")
   })
 })
 
@@ -133,6 +153,33 @@ describe("toAiMessages", () => {
       type: "text",
       text: "<system-update>\nchrono\n</system-update>",
     })
+  })
+
+  it("artifact 引用块渲染为 [artifact:ref …] 文本(模型按需取回,不烧上下文)", () => {
+    const m = MessageSchema.parse({
+      id: "a1",
+      role: "user",
+      content: [
+        { type: "text", text: "hi" },
+        { type: "artifact", ref: "a-1", size: 1234, hash: "abc123" },
+      ],
+      createdAt: "t",
+    })
+    const out = toAiMessages([m])
+    const parts = out[0]?.content as Array<Record<string, unknown>>
+    expect(parts[1]).toEqual({ type: "text", text: "[artifact:ref a-1 size=1234 hash=abc123]" })
+  })
+
+  it("thinking 块渲染为 <thinking> 文本(思路链回灌)", () => {
+    const m = MessageSchema.parse({
+      id: "t1",
+      role: "assistant",
+      content: [{ type: "thinking", text: "先读文件" }],
+      createdAt: "t",
+    })
+    const out = toAiMessages([m])
+    const parts = out[0]?.content as Array<Record<string, unknown>>
+    expect(parts[0]).toEqual({ type: "text", text: "<thinking>\n先读文件\n</thinking>" })
   })
 })
 

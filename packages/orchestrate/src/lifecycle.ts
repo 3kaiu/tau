@@ -18,6 +18,11 @@ export class LoopGuard {
     this.counts.set(pattern, count)
     return count > this.threshold ? pattern : null
   }
+
+  /** 清空指纹计数(每 turn 边界调用:循环判定只在同 turn 迭代内成立,换任务/换 turn 不延续毒化)。 */
+  reset(): void {
+    this.counts.clear()
+  }
 }
 
 /** turnId 生成:以会话 epoch 为单调序列(epoch 经 kv 持久,跨重启不重置、进程内同会话不重复)。

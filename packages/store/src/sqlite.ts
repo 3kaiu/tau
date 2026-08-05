@@ -396,17 +396,25 @@ export class SqliteStore implements Store {
   private readonly countArchivedStmt: Statement
 
   constructor(path: string, options: SqliteStoreOptions = {}) {
+    const readonly = options.readonly === true
     // 单写者锁:文件型路径且非只读 → 独占(第二写者明确错误;`:memory:` 无跨进程竞争不拿锁)
-    this.lock = path !== ":memory:" && options.readonly !== true ? acquireWithLock(path) : null
-    const raw = new Database(path)
-    raw.exec("PRAGMA journal_mode = WAL")
-    raw.exec("PRAGMA foreign_keys = ON")
-    raw.exec("PRAGMA busy_timeout = 5000")
+    this.lock = path !== ":memory:" && !readonly ? acquireWithLock(path) : null
+    // 真只读:不建文件(fileMustExist 语义)、跳过 WAL/migrate(观测命令绝不因"看一眼"写库)
+    const raw = readonly
+      ? new Database(path, { readonly: true, create: false })
+      : new Database(path)
+    if (!readonly) {
+      raw.exec("PRAGMA journal_mode = WAL")
+      raw.exec("PRAGMA foreign_keys = ON")
+      raw.exec("PRAGMA busy_timeout = 5000")
+    } else {
+      raw.exec("PRAGMA query_only = ON")
+    }
     this.db = options.slowQueryThresholdMs !== undefined
       ? withSlowQueryLog(raw, options.slowQueryThresholdMs, options.slowQueryLogger)
       : raw
     this.txFn = this.db.transaction((fn: () => unknown) => fn())
-    migrate(this.db)
+    if (!readonly) migrate(this.db)
     this.sessions = new SqliteSessionTable(this.db)
     this.messages = new SqliteMessageTable(this.db)
     this.events = new SqliteEventTable(this.db)
@@ -428,6 +436,10 @@ export class SqliteStore implements Store {
   }
 
   migrate(): void {
+    if (this.lock === null) {
+      // 只读连接(或 :memory:)不做 schema 变更;只读库要求已迁移
+      return
+    }
     migrate(this.db)
   }
 

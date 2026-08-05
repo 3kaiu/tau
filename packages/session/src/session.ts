@@ -12,6 +12,7 @@ import {
   type SessionSnapshot,
   type WakeReason,
   ModelSchema,
+  createEventIdGenerator,
   recentActivityFrom,
 } from "@tau/contract"
 import type { ArtifactMeta, Store } from "@tau/store"
@@ -137,7 +138,8 @@ export interface Session {
   purgeArtifact(ref: string): void
 }
 
-const uuid = () => crypto.randomUUID()
+// 事件/消息 id 同一单调序列(进程前缀 + 定宽序号,字典序 = 因果序;消息 id 与事件 id 全局唯一)
+const uuid = createEventIdGenerator()
 
 export function createSession(options: SessionOptions): Session {
   const { store, sessionId } = options
@@ -255,7 +257,7 @@ export function createSession(options: SessionOptions): Session {
         toolCalls: [],
         toolResults: [],
         interrupted: false,
-        retention: input.retention ?? "high",
+        retention: input.retention ?? "normal",
         source: input.source,
         createdAt: clock().wall,
       }

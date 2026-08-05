@@ -300,6 +300,20 @@ describe("action 平面:补齐工具面(edit/grep/find/ls/ask_user/system/catalo
     expect(events.some((e) => e.kind === "permission" && e.state === "requested" && (e as { requestId?: string }).requestId === "ok1")).toBe(true)
     expect(events.some((e) => e.kind === "permission" && e.state === "granted")).toBe(true)
   })
+
+  it("onPermission 回调无应答 → 超时拒绝(不永久挂起)", async () => {
+    const store2 = createMemoryStore()
+    const events: Array<{ kind: string; state?: string }> = []
+    const plane = createActionPlane(store2, {
+      workspaceRoots: ["/tmp/tau-test"],
+      permissionTimeoutMs: 30,
+      onPermission: () => new Promise<boolean>(() => {}),
+      onEvent: (e) => events.push(e as never),
+    })
+    const out = await plane.execute({ sessionId: "s", toolCallId: "c1", name: "bash", args: { command: "echo hi" }, cwd: "/tmp/tau-test" })
+    expect(out.ok).toBe(false)
+    expect(events.some((e) => e.kind === "permission" && e.state === "timeout")).toBe(true)
+  })
 })
 
 describe("action 平面:grantScope 作用域预授权", () => {
@@ -610,5 +624,33 @@ describe("action 平面:workspace 模型统一(M10.5:gitignore + 越界归属 + 
     expect(rm.ok).toBe(true)
     const listed2 = await plane.execute({ sessionId: "s", toolCallId: "w9", name: "worktree:list", args: {}, cwd: root })
     if (listed2.ok) expect(listed2.result.stdout).toContain("0 条目")
+  })
+})
+
+describe("capability:类别匹配(P1-3)", () => {
+  it("read 类别规则命中 grep/find/ls/retrieve(defaultRule.pattern 为类别)", async () => {
+    const { plane } = fresh(false)
+    for (const name of ["grep", "find", "ls", "retrieve"]) {
+      const syscall = plane.registry.get(name)
+      if (syscall === null) continue
+      expect(plane.gate.decide(name, syscall.dangerous, syscall.defaultRule?.pattern)).toEqual({ rule: "allow" })
+    }
+  })
+
+  it("write 类别命中 edit(同 ask 语义,规则表确定性命中)", async () => {
+    const { plane } = fresh(false)
+    const syscall = plane.registry.get("edit")
+    expect(plane.gate.decide("edit", false, syscall?.defaultRule?.pattern)).toEqual({ rule: "ask" })
+  })
+
+  it("headless 全链路:autoApprove=false 时 grep 直接执行(不挂起询问)", async () => {
+    const dir = `/tmp/tau-cap-${Date.now()}`
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(`${dir}/a.txt`, "hello world")
+    const store = createMemoryStore()
+    const plane = createActionPlane(store, { workspaceRoots: [dir], autoApprove: false })
+    const out = await plane.execute({ sessionId: "s", toolCallId: "g1", name: "grep", args: { pattern: "hello", path: dir }, cwd: dir })
+    expect(out.ok).toBe(true)
+    if (out.ok) expect(out.result.stdout).toContain("hello world")
   })
 })

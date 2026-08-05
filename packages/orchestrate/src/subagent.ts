@@ -12,8 +12,9 @@ import { recordAudit, type ActionPlane, type ExecuteOutcome } from "@tau/action"
 import { createSession, type Session } from "@tau/session"
 import { createScheduler, type Scheduler, type TurnResult } from "./scheduler.ts"
 
-/** 缺省能力面 = 只读集(与 opencode subagent 缺省一致:探索可,修改须显式声明)。 */
-export const SUBAGENT_DEFAULT_TOOLS = ["read", "grep", "find", "ls", "retrieve", "result", "tool:catalog", "ask_user", "skill_load"] as const
+/** 缺省能力面 = 只读集(与 opencode subagent 缺省一致:探索可,修改须显式声明)。
+ * 不含 retrieve:executor 装配在父会话面,子代理检索会穿透父子隔离(隔离优先于便利)。 */
+export const SUBAGENT_DEFAULT_TOOLS = ["read", "grep", "find", "ls", "result", "tool:catalog", "ask_user", "skill_load"] as const
 
 export type SubagentOptions = {
   /** 全局并发上限(缺省 4)。 */
@@ -100,11 +101,14 @@ function saveReg(store: Store, entry: SubagentRegEntry): void {
   store.kv.set(`${REG_PREFIX}${entry.sessionId}`, JSON.stringify(entry))
 }
 
-/** 嵌套深度:沿注册表上溯 parent 链;非 subagent 会话深度 = 0。 */
+/** 嵌套深度:沿注册表上溯 parent 链;非 subagent 会话深度 = 0。visited 防环(注册表数据损坏时封顶,不毒化链)。 */
 export function depthOf(store: Store, sessionId: string): number {
   let depth = 0
   let current = sessionId
+  const visited = new Set<string>()
   while (depth < 100) {
+    if (visited.has(current)) return depth
+    visited.add(current)
     const raw = store.kv.get(`${REG_PREFIX}${current}`)
     if (raw === null) break
     const entry = JSON.parse(raw) as SubagentRegEntry
@@ -176,7 +180,13 @@ export async function runSubagent(
 
   const childId = `${manifest.parentSessionId}-sub-${crypto.randomUUID().slice(0, 8)}`
   const now = new Date().toISOString()
-  saveReg(deps.store, { sessionId: childId, parentSessionId: manifest.parentSessionId, depth, status: "running", createdAt: now, updatedAt: now })
+  // 注册表写失败不泄漏 limiter 计数:失败 → 释放并拒绝派生
+  try {
+    saveReg(deps.store, { sessionId: childId, parentSessionId: manifest.parentSessionId, depth, status: "running", createdAt: now, updatedAt: now })
+  } catch {
+    release(manifest.parentSessionId)
+    return { sessionId: "", text: "subagent 注册表写入失败(store 不可用),拒绝派生", turns: 0, toolCalls: 0, status: "partial", depth }
+  }
 
   const allowedNames = new Set(manifest.tools ?? SUBAGENT_DEFAULT_TOOLS)
   const allowedSyscalls = deps.action.registry.all().filter((t) => allowedNames.has(t.name))
@@ -196,9 +206,13 @@ export async function runSubagent(
     const status: SubagentStatus = result.aborted || result.error !== null ? "partial" : "completed"
     const preview = result.text.slice(0, opts.resultPreviewChars ?? 4000)
     const text = preview.length < result.text.length
-      ? `${preview}\n\n(产出已截断;完整内容见子会话 ${childId},可经 retrieve 观察)`
+      ? `${preview}\n\n(产出已截断;完整内容见子会话 ${childId})`
       : result.text
-    saveReg(deps.store, { sessionId: childId, parentSessionId: manifest.parentSessionId, depth, status, createdAt: now, updatedAt: new Date().toISOString() })
+    try {
+      saveReg(deps.store, { sessionId: childId, parentSessionId: manifest.parentSessionId, depth, status, createdAt: now, updatedAt: new Date().toISOString() })
+    } catch {
+      // 注册表写失败不影响回执;计数已由调用方 release
+    }
     return { sessionId: childId, text, turns: result.turns, toolCalls: result.toolCalls, status, depth }
   }
 
@@ -230,11 +244,19 @@ export async function runSubagent(
   if (manifest.background === true) {
     void runChild().then(
       (result) => {
-        saveReg(deps.store, { sessionId: childId, parentSessionId: manifest.parentSessionId, depth, status: result.aborted || result.error !== null ? "partial" : "completed", createdAt: now, updatedAt: new Date().toISOString() })
+        try {
+          saveReg(deps.store, { sessionId: childId, parentSessionId: manifest.parentSessionId, depth, status: result.aborted || result.error !== null ? "partial" : "completed", createdAt: now, updatedAt: new Date().toISOString() })
+        } catch {
+          // 后台注册表写失败:状态丢失可观测(注册表缺条目),计数必须释放
+        }
         release(manifest.parentSessionId)
       },
       () => {
-        saveReg(deps.store, { sessionId: childId, parentSessionId: manifest.parentSessionId, depth, status: "partial", createdAt: now, updatedAt: new Date().toISOString() })
+        try {
+          saveReg(deps.store, { sessionId: childId, parentSessionId: manifest.parentSessionId, depth, status: "partial", createdAt: now, updatedAt: new Date().toISOString() })
+        } catch {
+          // 同上:计数释放优先
+        }
         release(manifest.parentSessionId)
       },
     )

@@ -2,9 +2,12 @@
 // 交换 = "摘要进历史、全文移归档";不删用户意图、不裁工具定义。摘要文本由调用方
 // (enhance 策略)产出,本文件只做交换编排。
 
-import type { Event, Message } from "@tau/contract"
+import { createEventIdGenerator, type Event, type Message } from "@tau/contract"
 import type { Store } from "@tau/store"
 import { compactionCandidates } from "./history.ts"
+
+// 与 session 同源语义:进程前缀 + 单调序列(摘要消息 id 与事件 id 全局唯一、按 id 可排序)
+const uuid = createEventIdGenerator()
 
 export type CompactDeps = {
   store: Store
@@ -29,13 +32,13 @@ export function runCompact(deps: CompactDeps): Message | null {
   void keep
   if (drop.length === 0) return null
   const summary: Message = {
-    id: crypto.randomUUID(),
+    id: uuid(),
     role: "system",
     content: [{ type: "text", text: deps.summaryText }],
     toolCalls: [],
     toolResults: [],
     interrupted: false,
-    retention: "high",
+    retention: "normal",
     source: "compaction",
     createdAt: deps.clockNow(),
   }
@@ -45,14 +48,14 @@ export function runCompact(deps: CompactDeps): Message | null {
   deps.registerSummary(summary.id)
   deps.store.messages.append(deps.sessionId, summary)
   deps.emit({
-    id: crypto.randomUUID(),
+    id: uuid(),
     timestamp: deps.clockNow(),
     redact: [],
     kind: "compression",
     droppedIds,
     strategy: deps.reason,
   })
-  deps.emit({ id: crypto.randomUUID(), timestamp: deps.clockNow(), redact: [], kind: "transcript", message: summary })
+  deps.emit({ id: uuid(), timestamp: deps.clockNow(), redact: [], kind: "transcript", message: summary })
   deps.touch()
   return summary
 }

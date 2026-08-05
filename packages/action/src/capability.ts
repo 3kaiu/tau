@@ -54,15 +54,18 @@ export class CapabilityGate {
     this._rules = [...this._rules, rule]
   }
 
-  /** 匹配规则:同 pattern 精确或通配;规则表后置优先(冲突以后置为准)。作用域授权先于规则表。 */
-  decide(toolName: string, dangerous: boolean): CapabilityDecision {
+  /**
+   * 匹配规则:pattern 命中工具名(精确/通配)或工具声明的类别(defaultRule.pattern,
+   * 如 read 类别覆盖 grep/find/ls/retrieve);规则表后置优先(冲突以后置为准)。作用域授权先于规则表。
+   */
+  decide(toolName: string, dangerous: boolean, category?: string): CapabilityDecision {
     if (this.consumeGrant(toolName) !== null) {
       return { rule: "allow" }
     }
     let matched: CapabilityRule | null = null
     for (const rule of this.rules) {
       if (rule.scope !== "tool") continue
-      if (rule.pattern === toolName || rule.pattern.includes("*") && wildcardMatch(rule.pattern, toolName)) {
+      if (matchesPattern(rule.pattern, toolName) || (category !== undefined && matchesPattern(rule.pattern, category))) {
         matched = rule
       }
     }
@@ -98,4 +101,9 @@ export class CapabilityGate {
 export function wildcardMatch(pattern: string, value: string): boolean {
   const regex = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")
   return new RegExp(`^${regex}$`).test(value)
+}
+
+/** pattern 命中:精确或通配。 */
+function matchesPattern(pattern: string, value: string): boolean {
+  return pattern === value || (pattern.includes("*") && wildcardMatch(pattern, value))
 }
