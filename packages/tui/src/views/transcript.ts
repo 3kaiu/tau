@@ -233,7 +233,15 @@ export class TranscriptView implements Component {
     const cacheStale = this.cachedLines === null || this.cachedWidth !== width || this.streamDirty || showStream !== this.cachedHasStream
     if (cacheStale) {
       this.cachedWidth = width
-      this.cachedLines = this.lines.slice(-this.maxRenderLines).map((line) => wrapLine(line, width))
+      // maxRenderLines 按物理行(含 wrap)截断:先 wrap 再取末尾,避免 wrap 膨胀把
+      // 底部固定区(editor)顶出终端可视区。增量追加用 dedup(比 slice 每条 wrap 便宜)。
+      const wrapped = this.lines.slice(-this.maxLines).map((line) => wrapLine(line, width))
+      const flat: string[] = []
+      for (const l of wrapped) {
+        const parts = l.split("\n")
+        for (const p of parts) flat.push(p)
+      }
+      this.cachedLines = flat.slice(-this.maxRenderLines)
       this.cachedHasStream = false
     }
     this.streamDirty = false

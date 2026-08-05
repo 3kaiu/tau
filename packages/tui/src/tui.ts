@@ -88,7 +88,11 @@ export function createTui(deps: TuiDeps): Tui {
 
   function adjustLayout(): void {
     const rows = terminal.rows
-    const fixedOverhead = 1 + 1 + 1 + 3
+    const width = terminal.columns
+    // 固定区高度 = 资源面板(1) + 空行(3) + 工具面板(可变) + 编辑器(1) + 提示(1)。
+    // 工具面板行数随内容浮动,按当前宽度实测(物理行),避免其膨胀把 editor 顶出可视区。
+    const toolLines = toolPanel.render(width).length
+    const fixedOverhead = 1 + 3 + toolLines + 1 + 1
     transcript.setMaxRenderLines(Math.max(4, rows - fixedOverhead))
     ui.requestRender()
   }
@@ -123,6 +127,7 @@ export function createTui(deps: TuiDeps): Tui {
     })
     ensureSpinner()
     if (!transcript.isStreaming()) stopSpinner()
+    adjustLayout()
     ui.requestRender()
   }
 
@@ -208,10 +213,16 @@ export function createTui(deps: TuiDeps): Tui {
 
   const unsubscribe = face.subscribe(handleEvent)
 
+  // 终端 resize 后重算布局(pi-tui 不向应用转发 resize,自挂 process.stdout)。
+  // 防止高度变化后 transcript 显示行数与可视区错位(editor 漂移)。
+  const onResize = (): void => adjustLayout()
+  process.stdout.on("resize", onResize)
+
   function stop(): void {
     if (stopped) return
     stopped = true
     stopSpinner()
+    process.stdout.off("resize", onResize)
     unsubscribe()
     permissionPopup.dismiss()
     ui.stop()

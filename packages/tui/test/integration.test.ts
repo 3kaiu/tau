@@ -464,4 +464,20 @@ describe("集成:Event 流驱动 transcript + tool-panel", () => {
     expect(stripAnsi(final.join("\n"))).toContain("读了三个文件")
     expect(final.some((l) => l.includes("⠋") || l.includes("⠙"))).toBe(false)
   })
+
+  it("物理行截断:wrap 后总行数不超 maxRenderLines(防止顶出底部固定区)", () => {
+    const tc = new TranscriptView({ maxLines: 1000 })
+    tc.setMaxRenderLines(5)
+
+    // 一条超长消息,宽度 40 下 wrap 成多行
+    for (let i = 0; i < 10; i++) {
+      tc.consume(transcript(assistantMsg(`第${i}条 ` + "中文很长".repeat(20))))
+    }
+
+    const lines = tc.render(40)
+    // 逻辑行 10 条远超 5;wrap 后物理行也必须 ≤ 5
+    expect(lines.length).toBeLessThanOrEqual(5)
+    // 最近的内容应保留(末尾附近含第9条)
+    expect(stripAnsi(lines.join("\n"))).toContain("第9条")
+  })
 })
