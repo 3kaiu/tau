@@ -60,8 +60,8 @@ function assertModelVisible(projection: ContextProjection): void {
       if (block.type === "artifact" && !messages.includes(`[artifact:ref ${block.ref}`)) {
         throw new Error(`FauxLlm: artifact 引用块未渲染进模型输入(ref=${block.ref})`)
       }
-      if (block.type === "thinking" && !messages.includes("<thinking>")) {
-        throw new Error("FauxLlm: thinking 块未渲染进模型输入")
+      if (block.type === "thinking" && !messages.includes(`"type":"reasoning"`)) {
+        throw new Error("FauxLlm: thinking 块未渲染进模型输入(缺 reasoning part,DeepSeek 系网关会拒收)")
       }
     }
   }

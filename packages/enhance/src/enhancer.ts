@@ -38,7 +38,7 @@ export interface Enhancer {
   loaderStats(): LoaderStats
   /** 产出投影块(注入 session.extraSystemBlocks + self.skills)。传 sessionId 时附加记忆索引块(两级装载:索引常驻,全文按需)。 */
   apply(sessionId?: string): { systemBlocks: SystemBlock[]; skillNames: string[]; skillsDir: string }
-  /** skill:load -- 按名取全文。 */
+  /** skill_load -- 按名取全文。 */
   getSkill(name: string): string | null
   /** skill 目录。 */
   catalog(): SkillCatalog
@@ -107,7 +107,7 @@ export function createEnhancer(opts: EnhancerOptions): Enhancer {
         })
       }
 
-      // 会话记忆索引 -> memory 级 system 块(两级装载:索引常驻,全文经 memory:read/search 按需取)
+      // 会话记忆索引 -> memory 级 system 块(两级装载:索引常驻,全文经 memory_read/search 按需取)
       if (sessionId !== undefined) {
         const entries = listMemory(options.store, sessionId)
         if (entries.length > 0) {
@@ -120,7 +120,7 @@ export function createEnhancer(opts: EnhancerOptions): Enhancer {
           blocks.push({
             kind: "memory",
             priority: 30,
-            content: `## 会话记忆索引(全文经 memory:read / memory:search 按需取)\n${lines.join("\n")}`,
+            content: `## 会话记忆索引(全文经 memory_read / memory_search 按需取)\n${lines.join("\n")}`,
           })
         }
       }

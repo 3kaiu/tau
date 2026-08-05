@@ -12,7 +12,7 @@ LLM 的手脚。唯一副作用出口:安全、可审计、可中断地执行 Sy
 - `plane.permissionRequest()`(挂起请求列表,远程凭 requestId 决议)/ `plane.grant(requestId)`(单次决议)/ `plane.grantScope(caps, scope)` — 授权流(**作用域预授权:一次批准 N 次**,maxUses/durationMs;危险命令不经豁免);`grant(caps, scope)` 的旧签名已并入 grantScope
 - **权限事件双轨**:询问时同时发 `permission(requested)` 事件(requestId + 参数摘要)与调用 `onPermission` 回调(本地弹窗);决议后发 `granted/denied/timeout` 事件——**requested 事件供远程客户端/观察者经 Event 流可见(approve/deny 凭 requestId 定位),回调供本地 UI 即时决策,双轨不互斥**
 - `plane.audit.query(filter)` — 副作用审计日志查询(LLM 可查自己的 syscall 史)
-- 内置工具:read/write/edit/bash/grep/find/ls/ask_user/retrieve/fetch/system/tool:catalog(工具目录查询,冷工具按需注入)/result(截断续读+后台轮询)/**artifact:read(按引用取回大载荷正文,session 外置 artifact 的模型检索路径)**/**worktree:create/rm/list(T2 内部机制,仅编排层调用,不注入模型投影)**
+- 内置工具:read/write/edit/bash/grep/find/ls/ask_user/retrieve/fetch/system/tool_catalog(工具目录查询,冷工具按需注入)/result(截断续读+后台轮询)/**artifact_read(按引用取回大载荷正文,session 外置 artifact 的模型检索路径)**/**worktree_create/rm/list(T2 内部机制,仅编排层调用,不注入模型投影)**
 - read 支持 `range{from,to}` / `preview`(前 N 行 + 总行数报告)——大文件不整读;结果带 `fileMeta { mtime, size, hash? }`(模型判断文件是否已被改动)
 - 进程类结果带 **`exitCode` + stdout/stderr 分离**:`isError` 之外有真相源,模型区分"警告"与"错误"
 - bash 参数过**危险命令模式检测**(`rm -rf /`/`git push --force`/`sudo`/`curl | sh` 等),命中强制询问(与 capability 门叠加,不走静默允许)
@@ -42,7 +42,7 @@ LLM 的手脚。唯一副作用出口:安全、可审计、可中断地执行 Sy
 17. **原子写**:write/edit 走临时文件 + rename 原子提交,失败不留半写文件(crash 恢复后文件要么旧版要么新版,无中间态)
 18. **进程树终止**:取消/超时/abort 传播到整棵进程树(detach 的后台任务取消 taskId 时清理其子进程),防孤儿进程泄漏
 19. **物理沙箱显式不做**:第一版无 OS 级进程隔离(容器/沙箱运行时);防线 = capability 门 + 危险命令检测 + 审计 + 工作区边界,替代防线已声明,不默认"有沙箱"
-20. **内部机制工具(T2)**:编排层内部件(如 worktree:create/rm/list)注册为 tier T2,永不注入模型投影(有/无 tier 规则均排除);但调用仍走 `execute` + capability 门 + 全量审计——内部件不豁免审计,不是"隐藏命令"(宪法 7)
+20. **内部机制工具(T2)**:编排层内部件(如 worktree_create/rm/list)注册为 tier T2,永不注入模型投影(有/无 tier 规则均排除);但调用仍走 `execute` + capability 门 + 全量审计——内部件不豁免审计,不是"隐藏命令"(宪法 7)
 
 ## 内部模块
 | 模块 | 职责 |
@@ -53,18 +53,18 @@ LLM 的手脚。唯一副作用出口:安全、可审计、可中断地执行 Sy
 | `src/audit.ts` | 审计日志(写入 + 查询) |
 | `src/workspace.ts` | 工作区模型(`WorkspaceIndex`)——**根列表 + 越界校验 + gitignore 忽略树全部落地**:目录 mtime = 子条目结构指纹,未变目录零 stat 复用、变化目录只重扫一层并递归检查,全量重扫仅冷启动;`resolveWithin` 统一越界判定(roots 空 = 不设界,roots 非空 = 严格拒绝),find/grep/ls 与 read/write/edit 同源不漂移;**gitignore 只读根 `.gitignore`(ignore 预编译匹配树)**,指纹 `{mtimeMs,size}` 失效——内容变更即使目录 mtime 未变也整根重扫(不牺牲新鲜度);删除目录剪除缓存键(无幽灵条目);`.tau-worktrees` 入 SKIP_DIRS(工作树不进模型检索视野) |
 | `src/worktree.ts` | 工作树(T2 内部件):`WORKTREE_DIR=".tau-worktrees"` 下 mkdir -p 创建/rmSync 清理/枚举;名称契约 `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`(非法名 rejected,防越界);orchestrate 子会话隔离归属的唯一出口(经 execute 审计) |
-| `src/tools/` | 内置工具 14 件模型面:read/write/edit/bash/grep/find/ls/ask_user/retrieve/fetch/system/tool:catalog/result/artifact:read + worktree 3 件 T2 内部(create/rm/list,见 worktree.ts) |
+| `src/tools/` | 内置工具 14 件模型面:read/write/edit/bash/grep/find/ls/ask_user/retrieve/fetch/system/tool_catalog/result/artifact_read + worktree 3 件 T2 内部(create/rm/list,见 worktree.ts) |
 | MCP 客户端 | **不在本包**(原 `src/mcp/` 空壳已清):第三方工具经 `registry` + `execute` 通道接入(宪法 9 无豁免),客户端实现在 app 拼装点 `app/src/mcp.ts`(工具名转义 + defaultRule 注入 + callTool 适配,见 app SPEC) |
 
 ## 模块宪法要点
 - `runtime.ts`:同一工具可并发,文件写操作串行(互斥队列);**执行并发按 tier 分级(T0 互斥串行 / T1 并行,与契约 tier 语义一致)**;write/edit 走临时文件 + rename 原子提交;取消/超时终止整棵进程树,后台任务取消时清理孤儿;**`executeStream` 是底层原语**(逐调用产出 `started` → `completed`/`failed` 终态事件),`execute` 是兼容收口(内部即 for-await 流消费);权限询问/挂起等旁路事件只进 onEvent 双轨不进流;**`ExecuteRequest.signal` 是中断输入**(steer 立即断流/取消):中止挂起询问(清理挂起项,不挂等决议)、终止在飞 bash(信号已触发时 spawn 即杀,无孤儿)、以 `cancelled` 错误收尾,未执行调用由调度层拦截
 - `capability.ts`:询问时发 `permission(requested)` 事件(requestId/工具名/能力/理由 + **参数摘要**:bash 命令全文、write 目标路径)并同步调 `onPermission` 回调——用户批准前看到"模型要跑什么",不只是"要不要放行";决议后发 `granted/denied/timeout` 事件,approve(经 toolCallId 承载 requestId)/deny 定位到挂起请求
 - `audit.ts`:审计记录本身也是事件,进入 LLM 可查空间;审计记录带 **`turnId`**(提交点边界由 orchestrate 在 turn 尾部 `commitTurn` 写入,经 `ExecuteRequest.turnId` 透传)——recovery 悬置判定("上次 turn 已提交/未提交的 syscall")以 turnId 为判定输入(判定实现在 session 恢复路径)
-- `workspace.ts`:`WorkspaceIndex` 增量语义——目录 mtime 命中(含缓存态递归检查)不 stat 子条目、miss 只重扫该目录一层;文件内容编辑不改目录 mtime(树结构查询不关心内容,代价是 find 结果不携带实时 size/mtime);`stats()` 暴露 fullScans/dirRescans/dirHits(增量生效可断言);忽略判定以 ignoreRoot 为基准的相对路径(不是进程 cwd),`\` → `/`(Windows);gitignore 指纹失效 → clearSubtree + 整根重扫;`SKIP_DIRS` 与工具 ls/find 过滤同源,find 行为不漂移;**multi-run fork 子会话时持久 shell 初始 cwd = 子会话 worktree 根,工作树创建/清理经 `worktree:create/rm`(execute 审计),crash 残留可经 `worktree:list` 发现**
+- `workspace.ts`:`WorkspaceIndex` 增量语义——目录 mtime 命中(含缓存态递归检查)不 stat 子条目、miss 只重扫该目录一层;文件内容编辑不改目录 mtime(树结构查询不关心内容,代价是 find 结果不携带实时 size/mtime);`stats()` 暴露 fullScans/dirRescans/dirHits(增量生效可断言);忽略判定以 ignoreRoot 为基准的相对路径(不是进程 cwd),`\` → `/`(Windows);gitignore 指纹失效 → clearSubtree + 整根重扫;`SKIP_DIRS` 与工具 ls/find 过滤同源,find 行为不漂移;**multi-run fork 子会话时持久 shell 初始 cwd = 子会话 worktree 根,工作树创建/清理经 `worktree_create/rm`(execute 审计),crash 残留可经 `worktree_list` 发现**
 - `tools/bash.ts`:长输出截断 + 环境注入(session 元数据),受 `PI_` 式环境变量约束;**缺省会话级持久 shell**(shellId 缺省 = 当前会话;`new_shell: true` 重置);结果必带 exitCode,stdout/stderr 分离;危险命令模式检测命中 → 强制询问
 - `tools/fetch.ts`:HTML→文本净化 + 大小上限 + 注入防护
 - `tools/ask_user.ts`:返回 questionId 挂起;选择模式(选项列表)经 select 命令多选
-- `tools/read.ts`:range/preview 参数 + 行数报告 + 二进制/编码检测 + fileMeta(mtime/size/hash);`tools/system.ts`:内省 syscall——完整权限规则/队列状态/pending 计数/工具目录(tool:catalog 后端)
+- `tools/read.ts`:range/preview 参数 + 行数报告 + 二进制/编码检测 + fileMeta(mtime/size/hash);`tools/system.ts`:内省 syscall——完整权限规则/队列状态/pending 计数/工具目录(tool_catalog 后端)
 - `runtime.ts`:输出过 secret 模式检测;路径越界检查(workspaceRoots)
 
 ## 开源依赖

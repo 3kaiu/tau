@@ -268,7 +268,7 @@ export function createSession(options: SessionOptions): Session {
       // 回执事件与历史同规:大输入不进事件流(与 externalizeContent 同阈值;超限给引用预览,正文只存 store)
       const receiptText =
         input.text.length > artifactThreshold
-          ? `[大输入已外置 artifact(正文存 store,经 artifact:read 取回);前 200 字符:${input.text.slice(0, 200)}…]`
+          ? `[大输入已外置 artifact(正文存 store,经 artifact_read 取回);前 200 字符:${input.text.slice(0, 200)}…]`
           : input.text
       emit({
         id: uuid(),

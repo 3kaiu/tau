@@ -660,7 +660,7 @@ describe("tier 规则工具注入裁剪(M10.3-e)", () => {
     { name: "read", description: "r", parameters: {}, tier: "T0" as const, dangerous: false },
     { name: "grep", description: "g", parameters: {}, tier: "T1" as const, dangerous: false },
     { name: "find", description: "f", parameters: {}, tier: "T1" as const, dangerous: false },
-    { name: "tool:catalog", description: "c", parameters: {}, tier: "T0" as const, dangerous: false },
+    { name: "tool_catalog", description: "c", parameters: {}, tier: "T0" as const, dangerous: false },
   ]
 
   function sessionWithRules(rules: { overrides?: Record<string, "T0" | "T1">; defaultTier?: "T0" | "T1" }) {
@@ -677,7 +677,7 @@ describe("tier 规则工具注入裁剪(M10.3-e)", () => {
     const session = sessionWithRules({ overrides: { read: "T0" } })
     const names = session.project().tools.map((t) => t.name)
     expect(names).toContain("read")
-    expect(names).toContain("tool:catalog")
+    expect(names).toContain("tool_catalog")
     expect(names).not.toContain("grep")
     expect(names).not.toContain("find")
   })
@@ -697,9 +697,9 @@ describe("tier 规则工具注入裁剪(M10.3-e)", () => {
 
   it("requestTools 对 T0 与未知名是 no-op;无 tier 规则时 requestTools 无副作用", () => {
     const session = sessionWithRules({})
-    session.requestTools(["read", "nonexistent", "tool:catalog"])
+    session.requestTools(["read", "nonexistent", "tool_catalog"])
     const names = session.project().tools.map((t) => t.name)
-    expect(names.filter((n) => !["read", "tool:catalog"].includes(n))).toEqual([])
+    expect(names.filter((n) => !["read", "tool_catalog"].includes(n))).toEqual([])
 
     const store = createStore("memory")
     const plain = createSession(makeOptions(store, { tools }))

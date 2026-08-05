@@ -1,5 +1,5 @@
 // @tau/action — tools/system.ts:system 工具。内省 syscall:完整权限规则/挂起计数/工具目录/
-// 后台任务;取消后台任务(cancel_task 是唯一允许的写动作)。tool:catalog 的工具目录后端。
+// 后台任务;取消后台任务(cancel_task 是唯一允许的写动作)。tool_catalog 的工具目录后端。
 
 import { toolError, toolResult } from "@tau/contract"
 import type { SystemCall, ToolResult } from "@tau/contract"

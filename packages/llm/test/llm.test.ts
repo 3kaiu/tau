@@ -170,7 +170,7 @@ describe("toAiMessages", () => {
     expect(parts[1]).toEqual({ type: "text", text: "[artifact:ref a-1 size=1234 hash=abc123]" })
   })
 
-  it("thinking 块渲染为 <thinking> 文本(思路链回灌)", () => {
+  it("thinking 块渲染为 reasoning part(wire = reasoning_content 回传)", () => {
     const m = MessageSchema.parse({
       id: "t1",
       role: "assistant",
@@ -179,7 +179,7 @@ describe("toAiMessages", () => {
     })
     const out = toAiMessages([m])
     const parts = out[0]?.content as Array<Record<string, unknown>>
-    expect(parts[0]).toEqual({ type: "text", text: "<thinking>\n先读文件\n</thinking>" })
+    expect(parts[0]).toEqual({ type: "reasoning", text: "先读文件" })
   })
 })
 

@@ -58,7 +58,7 @@ export function parseInput(raw: string, sender: Sender): ParsedInput {
     }
     case "skill": {
       if (rest === "") return { kind: "unknown", name, detail: "缺技能名(用 /help 查看命令)" }
-      return { kind: "skill", skillName: rest, command: { kind: "prompt", sender, text: `请使用 skill:load 工具加载技能 "${rest}" 的全文,然后按照该技能的指引执行任务。` } }
+      return { kind: "skill", skillName: rest, command: { kind: "prompt", sender, text: `请使用 skill_load 工具加载技能 "${rest}" 的全文,然后按照该技能的指引执行任务。` } }
     }
     case "help":
       return { kind: "help" }

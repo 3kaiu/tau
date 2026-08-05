@@ -93,7 +93,7 @@ describe("skills: loadSkills + catalogBlock", () => {
     const block = catalogBlock(catalog)
     expect(block).toContain("alpha: 第一个技能")
     expect(block).toContain("beta: 第二个技能")
-    expect(block).toContain("skill:load")
+    expect(block).toContain("skill_load")
   })
 
   it("不存在目录返回空目录", () => {
@@ -394,7 +394,7 @@ describe("enhancer: createEnhancer 聚合", () => {
     expect(memoryBlock).toBeDefined()
     expect(memoryBlock!.priority).toBe(30)
     expect(memoryBlock!.content).toContain("[偏好] 用户偏好简洁回复,不要啰嗦")
-    expect(memoryBlock!.content).toContain("memory:read")
+    expect(memoryBlock!.content).toContain("memory_read")
 
     // 无记忆时无 memory 块;其他会话隔离
     const empty = enhancer.apply("s-other")

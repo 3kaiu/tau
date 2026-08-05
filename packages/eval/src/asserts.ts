@@ -473,7 +473,7 @@ const assert16: Assert = {
     for (const r of result.runs) {
       if (!r.cwd.includes("/.tau-worktrees/")) throw new Error(`子会话未隔离到工作树: ${r.cwd}`)
     }
-    const worktreeEvents = f.events.filter((e) => e.kind === "tool" && (e.name === "worktree:create" || e.name === "worktree:rm"))
+    const worktreeEvents = f.events.filter((e) => e.kind === "tool" && (e.name === "worktree_create" || e.name === "worktree_rm"))
     if (worktreeEvents.length < 4) throw new Error(`工作树工具调用事件不足(2 run × create+rm ≥ 4):${worktreeEvents.length}`)
     const wtDir = join(f.session.project().self.cwd, ".tau-worktrees")
     if (existsSync(wtDir)) {
@@ -846,7 +846,7 @@ const assert25: Assert = {
 const assert26: Assert = {
   id: 26,
   name: "大载荷外置(artifact 正文存 store,历史仅引用)",
-  description: "超阈值 text 块自动外置为引用块(size/hash 可见,正文不进投影/事件流);按引用经 artifact:read 取回原文;小文本保持 inline",
+  description: "超阈值 text 块自动外置为引用块(size/hash 可见,正文不进投影/事件流);按引用经 artifact_read 取回原文;小文本保持 inline",
   async run() {
     const store = createMemoryStore()
     const session = createSession({
@@ -883,10 +883,10 @@ const assert26: Assert = {
     const body = session.readArtifact(blocks[1].ref)
     if (body?.body !== big) throw new Error("按引用取回正文不一致")
 
-    // 模型检索路径:artifact:read 工具(经 action 平面)
+    // 模型检索路径:artifact_read 工具(经 action 平面)
     const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-eval"], autoApprove: true })
-    const got = await action.execute({ sessionId: "eval-art", toolCallId: "r1", name: "artifact:read", args: { ref: blocks[1].ref }, cwd: "/tmp/tau-eval" })
-    if (!got.ok || got.result.stdout !== big) throw new Error("artifact:read 取回正文不一致")
+    const got = await action.execute({ sessionId: "eval-art", toolCallId: "r1", name: "artifact_read", args: { ref: blocks[1].ref }, cwd: "/tmp/tau-eval" })
+    if (!got.ok || got.result.stdout !== big) throw new Error("artifact_read 取回正文不一致")
     session.close()
   },
 }
@@ -970,13 +970,13 @@ const assert28: Assert = {
 const assert29: Assert = {
   id: 29,
   name: "Config tier 工具注入裁剪(T0 常驻,T1 按需,新 turn 重置)",
-  description: "提供 toolTierRules 时投影只含 T0 + tool:catalog;requestTools 注入 T1(本 turn);beginTurn 重置;无规则时全量注入不变",
+  description: "提供 toolTierRules 时投影只含 T0 + tool_catalog;requestTools 注入 T1(本 turn);beginTurn 重置;无规则时全量注入不变",
   async run() {
     const tools = [
       { name: "read", description: "r", parameters: {}, tier: "T0" as const, dangerous: false },
       { name: "grep", description: "g", parameters: {}, tier: "T1" as const, dangerous: false },
       { name: "find", description: "f", parameters: {}, tier: "T1" as const, dangerous: false },
-      { name: "tool:catalog", description: "c", parameters: {}, tier: "T0" as const, dangerous: false },
+      { name: "tool_catalog", description: "c", parameters: {}, tier: "T0" as const, dangerous: false },
     ]
     const store = createMemoryStore()
     const session = createSession({
@@ -990,7 +990,7 @@ const assert29: Assert = {
     const names = () => session.project().tools.map((t) => t.name)
 
     const first = names()
-    if (!first.includes("read") || !first.includes("tool:catalog")) throw new Error("T0/发现入口应常驻")
+    if (!first.includes("read") || !first.includes("tool_catalog")) throw new Error("T0/发现入口应常驻")
     if (first.includes("grep") || first.includes("find")) throw new Error("T1 不应缺省注入")
 
     session.requestTools(["grep"])
@@ -1033,7 +1033,7 @@ const assert30: Assert = {
     })
     const names = () => f.session.project().tools.map((t) => t.name)
     const first = names()
-    if (!first.includes("read") || !first.includes("tool:catalog")) throw new Error("T0/发现入口应常驻")
+    if (!first.includes("read") || !first.includes("tool_catalog")) throw new Error("T0/发现入口应常驻")
     if (first.includes("grep") || first.includes("bash")) throw new Error("T1 不应缺省注入")
     f.session.requestTools(["grep"])
     if (!names().includes("grep")) throw new Error("requestTools 未注入 T1")
@@ -1067,7 +1067,7 @@ const assert31: Assert = {
     const plane = createActionPlane(store, { workspaceRoots: [dir], autoApprove: true })
 
     const names = plane.registry.all().map((t) => t.name)
-    if (!names.includes("worktree:create") || !names.includes("worktree:rm") || !names.includes("worktree:list")) {
+    if (!names.includes("worktree_create") || !names.includes("worktree_rm") || !names.includes("worktree_list")) {
       throw new Error("worktree 工具未注册")
     }
 
@@ -1079,7 +1079,7 @@ const assert31: Assert = {
       tools: plane.registry.all(),
     })
     const injected = session.project().tools.map((t) => t.name)
-    if (injected.some((n) => n.startsWith("worktree:"))) throw new Error(`T2 工具泄漏进投影:${injected.join(",")}`)
+    if (injected.some((n) => n.startsWith("worktree_"))) throw new Error(`T2 工具泄漏进投影:${injected.join(",")}`)
     session.close()
 
     // 带 tier 规则时同样排除(两条路径均无 T2)
@@ -1092,14 +1092,14 @@ const assert31: Assert = {
       toolTierRules: { defaultTier: "T0", overrides: {} },
     })
     const injectedRules = rules.project().tools.map((t) => t.name)
-    if (injectedRules.some((n) => n.startsWith("worktree:"))) throw new Error("带规则时 T2 工具泄漏进投影")
+    if (injectedRules.some((n) => n.startsWith("worktree_"))) throw new Error("带规则时 T2 工具泄漏进投影")
     rules.close()
 
     // 内部调用面:仍走 execute(审计落盘),模型不可见不代表不可用
-    const created = await plane.execute({ sessionId: "eval-t2", toolCallId: "t1", name: "worktree:create", args: { name: "run-1" }, cwd: dir })
-    if (!created.ok) throw new Error(`worktree:create 失败:${created.error.code}`)
+    const created = await plane.execute({ sessionId: "eval-t2", toolCallId: "t1", name: "worktree_create", args: { name: "run-1" }, cwd: dir })
+    if (!created.ok) throw new Error(`worktree_create 失败:${created.error.code}`)
     const audit = queryAudit(store, "eval-t2")
-    if (!audit.some((a) => a.action.startsWith("worktree:create"))) throw new Error("worktree 调用未审计落盘")
+    if (!audit.some((a) => a.action.startsWith("worktree_create"))) throw new Error("worktree 调用未审计落盘")
 
     rmSync(dir, { recursive: true, force: true })
   },
@@ -1162,25 +1162,28 @@ const assert32: Assert = {
 
 // ---------- 33. 多代理编排(M12) ----------
 
-/** 简单脚本化 LLM:按调用序产出(奇数次工具调用,偶数次文本)。 */
+/** 简单脚本化 LLM:按调用序产出(奇数次工具调用,偶数次文本)。stream 与 complete 共享同一序号。 */
 function makeFakeLlm(script: (call: number) => { text?: string; toolCalls?: { id: string; name: string; args: Record<string, unknown> }[] }): import("@tau/llm").LlmKernel {
   let calls = 0
+  const next = async (): Promise<import("@tau/llm").LlmCollectResult> => {
+    calls++
+    const s = script(calls)
+    const hasTools = (s.toolCalls?.length ?? 0) > 0
+    return {
+      text: s.text ?? "",
+      thinking: "",
+      toolCalls: s.toolCalls ?? [],
+      usage: { promptTokens: 5, completionTokens: 3, totalTokens: 8 },
+      finishReason: hasTools ? "tool-calls" : "stop",
+      error: undefined,
+      aborted: false,
+    }
+  }
   return {
-    complete: async () => {
-      calls++
-      const s = script(calls)
-      const hasTools = (s.toolCalls?.length ?? 0) > 0
-      return {
-        text: s.text ?? "",
-        thinking: "",
-        toolCalls: s.toolCalls ?? [],
-        usage: { promptTokens: 5, completionTokens: 3, totalTokens: 8 },
-        finishReason: hasTools ? "tool-calls" : "stop",
-        error: undefined,
-        aborted: false,
-      }
+    complete: next,
+    stream: async function* () {
+      yield* streamFromResult(await next())
     },
-    stream: async function* () {},
     models: () => [],
     getModel: () => null,
     features: () => ({ supportsTools: true, supportsThinking: false, supportsParallelCalls: false, supportsVision: false, supportsStreaming: false }),
@@ -1189,6 +1192,22 @@ function makeFakeLlm(script: (call: number) => { text?: string; toolCalls?: { id
     cacheStats: () => ({ calls: 0, cachedTokenCandidates: 0, cacheReadTokens: 0 }),
     refresh: () => {},
   }
+}
+
+/** LlmCollectResult → 事件流:scheduler 走 stream(),假 LLM 必须能产出增量事件。 */
+async function* streamFromResult(result: import("@tau/llm").LlmCollectResult): AsyncGenerator<import("@tau/llm").LlmEvent> {
+  if (result.error) {
+    yield { type: "error", code: result.error.code, message: result.error.message, retryable: result.error.retryable }
+    return
+  }
+  if (result.aborted) {
+    yield { type: "aborted" }
+    return
+  }
+  if (result.thinking) yield { type: "thinking-delta", text: result.thinking }
+  if (result.text) yield { type: "text-delta", text: result.text }
+  for (const tc of result.toolCalls ?? []) yield { type: "tool-call", id: tc.id, name: tc.name, args: tc.args }
+  yield { type: "finish", finishReason: result.finishReason ?? "stop", usage: result.usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 } }
 }
 
 const assert33: Assert = {
@@ -1282,7 +1301,7 @@ const assert34: Assert = {
     const big = "大载荷".repeat(300)
     session.admit({ text: big, wake: "prompt", source: "eval" })
 
-    // thinking 块进历史 → 模型输入必须见到 <thinking> 渲染
+    // thinking 块进历史 → 模型输入必须见到 reasoning part(wire = reasoning_content,回传要求)
     session.appendMessage({
       id: "m-think",
       role: "assistant",
@@ -1306,14 +1325,27 @@ const assert34: Assert = {
 
     const raw = JSON.stringify(toAiMessages(projection.history))
     if (!raw.includes("[artifact:ref ")) throw new Error("artifact 引用块未渲染进模型输入")
-    if (!raw.includes("<thinking>")) throw new Error("thinking 块未渲染进模型输入")
+    if (!raw.includes(`"type":"reasoning"`) || !raw.includes("推理过程")) throw new Error("thinking 块未渲染进模型输入(缺 reasoning part)")
     if (raw.includes(big)) throw new Error("大载荷正文泄漏进模型输入(违宪:不烧上下文)")
 
     // 全链路:调度一轮经 scheduler→kernel→FauxLlm,可见面断言在模型侧触发
+    // 首回复带 thinking + 工具调用 → 调度器必须把 thinking 落历史,二次调用 reasoning 回传(wire=reasoning_content,DeepSeek 系网关拒收防线)
     const action = createActionPlane(store, { workspaceRoots: [dir], autoApprove: true })
-    const scheduler = createScheduler({ llm: createFauxLlm({ replies: [textReply("继续")] }), session, action })
+    const scheduler = createScheduler({
+      llm: createFauxLlm({
+        replies: [
+          { text: "", thinking: "先读取外置大载荷", toolCalls: [{ id: "c1", name: "read", args: { path: `${dir}/big.txt` } }], finishReason: "tool-calls" },
+          textReply("已读完"),
+        ],
+      }),
+      session,
+      action,
+    })
     const turn = await scheduler.prompt({ text: "读一下大载荷内容", source: "prompt" })
     if (turn.error !== null) throw new Error(`全链路轮未完成:${turn.error}`)
+    const history = session.project().history
+    const thinkBlocks = history.filter((m) => m.role === "assistant" && m.content.some((b) => b.type === "thinking" && b.text === "先读取外置大载荷"))
+    if (thinkBlocks.length === 0) throw new Error("thinking 未落历史:二次调用无法回传 reasoning_content(DeepSeek 网关拒收回归)")
 
     session.close()
     rmSync(dir, { recursive: true, force: true })

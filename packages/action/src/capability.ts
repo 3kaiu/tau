@@ -17,7 +17,7 @@ export const DEFAULT_RULES: readonly CapabilityRule[] = [
   { pattern: "write", rule: "ask", scope: "tool" },
   { pattern: "bash", rule: "ask", scope: "tool" },
   { pattern: "result", rule: "allow", scope: "tool" },
-  { pattern: "tool:catalog", rule: "allow", scope: "tool" },
+  { pattern: "tool_catalog", rule: "allow", scope: "tool" },
 ]
 
 export class CapabilityGate {

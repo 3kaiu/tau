@@ -61,8 +61,14 @@ export function errorCodeOf(error: unknown): { code: ErrorCode; retryable: boole
   return { code: "internal", retryable: false }
 }
 
-function errorMessage(error: unknown): string {
+/** 错误 → 人类可读消息。跨 bundle 副本/同构错误时 instanceof 可能失败,退到 message 字段提取,再退 String。 */
+export function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message
+  if (typeof error === "object" && error !== null) {
+    const m = (error as { message?: unknown }).message
+    if (typeof m === "string") return m
+    if (m !== undefined) return JSON.stringify(m)
+  }
   return String(error)
 }
 

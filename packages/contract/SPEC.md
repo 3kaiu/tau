@@ -5,7 +5,7 @@
 
 ## 功能(公开 API 面)
 - `Model` / `ProviderMeta` 元数据 schema(api/provider/id/**capabilities**/成本/上下文窗/**fallback 降级链声明**(同供应商优先、逐级下探,llm 据此熔断降级,非启发式))
-- 工具分级:tools[] 带 `tier`(T0 常驻 / T1 按需经 `tool:catalog` 查询后注入本 turn / **T2 内部机制——永不注入投影**(worktree 等,经 execute 审计))——**双语义声明**:执行侧(action)以 tier 决定并发策略(T0 互斥串行 / T1 并行);投影注入侧"每轮工具描述 token 只花在会用到的"由 session 按 Config tier 规则裁剪(**已落地**:提供 `toolTierRules` 时投影 = T0 + tool:catalog(发现入口恒在)+ 本 turn 经 `requestTools` 请求过的 T1;缺省全量注入,兼容旧行为)
+- 工具分级:tools[] 带 `tier`(T0 常驻 / T1 按需经 `tool_catalog` 查询后注入本 turn / **T2 内部机制——永不注入投影**(worktree 等,经 execute 审计))——**双语义声明**:执行侧(action)以 tier 决定并发策略(T0 互斥串行 / T1 并行);投影注入侧"每轮工具描述 token 只花在会用到的"由 session 按 Config tier 规则裁剪(**已落地**:提供 `toolTierRules` 时投影 = T0 + tool_catalog(发现入口恒在)+ 本 turn 经 `requestTools` 请求过的 T1;缺省全量注入,兼容旧行为)
 - 工具 schema 带 **`maxOutputTokens`**(调用前可知输出上限,与截断语义对齐)
 - `ModelCapabilities` — 能力面:`supportsTools / supportsThinking / supportsParallelCalls / supportsVision / supportsStreaming`;**元数据面(目录/路由/能力自省)——当前投影按 tier 规则裁剪、不按 capabilities 裁剪(能力裁剪为可选项,SPEC 明示现状)**
 - `ContextProjection`(投影 schema):`version(epoch) + wake + system[] + history[] + tools[] + self + resources`

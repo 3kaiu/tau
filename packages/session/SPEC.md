@@ -11,12 +11,12 @@ LLM 的记忆。回答唯一问题:"LLM 现在该看到什么"。`project()` 是
 - `session.compact(reason, summary)` — 交换:摘要进 T0,全文留 T1
 - `session.snapshot()` → `SessionSnapshot`(权威状态)
 - `session.promote/steer` 输入语义(由 orchestrate 调用;steer/follow-up 排队在 orchestrate 内部 steerQueue,不经 session)
-- 工具注入裁剪(**Config tier 规则**):opts 提供 `toolTierRules` 时投影 tools = T0 常驻 + tool:catalog 恒在 + 本 turn 经 `session.requestTools(names)` 请求过的 T1(orchestrate 在 T1 工具调用落下后请求,用过即注入后续迭代;`beginTurn` 重置);缺省(无规则)全量注入,兼容旧行为——"每轮工具描述 token 只花在会用到的"
+- 工具注入裁剪(**Config tier 规则**):opts 提供 `toolTierRules` 时投影 tools = T0 常驻 + tool_catalog 恒在 + 本 turn 经 `session.requestTools(names)` 请求过的 T1(orchestrate 在 T1 工具调用落下后请求,用过即注入后续迭代;`beginTurn` 重置);缺省(无规则)全量注入,兼容旧行为——"每轮工具描述 token 只花在会用到的"
 - `session.setGoal(goal)` — Goal 输入通道(orchestrate 判定结果经此写入,投影可见,依赖单向向下)
 - `session.pendSyscall(ask)` / `session.resolvePending(questionId)` — ask_user 挂起/恢复(模型在等你回答,UI/模型均可见)
 - `session.diff(fromEpoch, toEpoch)` — 投影差分(消费方增量渲染,免全量对比)——**易失性**:差异基于进程内 epochHistory(admit/appendMessage 时记录),**未记录过的 epoch(进程内从未 admit 的空 epoch,或重启后任意此后 epoch)**均返回 `epoch-history-missing`;消费方须退化为全量 snapshot 拉取(SPEC 第 3 条快照权威兜底),不把 diff 当持久承诺
 - `session.recent()` — 最近活动块(重试/中断/模型切换/压缩告警/**recovery 告警**,进投影)——**一切自动行为进投影,无例外**
-- 大载荷外置:`session.storeArtifact` / `readArtifact` / `listArtifacts` / `purgeArtifact`——text 块超阈值(缺省 16KB)自动外置为 artifact 引用(正文存 store,历史/投影/事件流只含引用,模型经 `artifact:read` 工具按需取回,不烧上下文)
+- 大载荷外置:`session.storeArtifact` / `readArtifact` / `listArtifacts` / `purgeArtifact`——text 块超阈值(缺省 16KB)自动外置为 artifact 引用(正文存 store,历史/投影/事件流只含引用,模型经 `artifact_read` 工具按需取回,不烧上下文)
 - 崩溃恢复:重启后从 store 重放,不靠内存;**副作用悬置判定**:审计带 `turnId`(提交点 = orchestrate 在 turn 尾部 `session.commitTurn(turnId)` 写入),恢复时按"审计最新 turn 晚于已提交锚点"判定上次 turn 未提交的 syscall 清单,`recovery` 事件 detail 带清单——模型检查文件而非瞎猜
 - `session.archive()` / `session.resume()` — 治理面入口:置 archived/active(发 lifecycle 事件,不删历史);注册表(store.sessions)随生命周期同步,resume 后状态与事件一致
 
@@ -44,10 +44,10 @@ LLM 的记忆。回答唯一问题:"LLM 现在该看到什么"。`project()` 是
 | `src/artifacts.ts` | 大载荷存储(artifact 正文存 store,历史仅引用;`externalizeContent` 超阈值 text 块 → 引用块,`readArtifact` 按引用取回) |
 
 ## 模块宪法要点
-- `projector.ts`:装配顺序固定(system → history → tools → self → resources),结果不可变;self 必含 clock/usage/cwd/permissions/skill 目录/session 身份,缺一即违宪;wake 与最近活动块必含(reason/重试/中断/切换);tools 注入按 Config `toolTierRules` 裁剪(T0 常驻 + tool:catalog 恒在 + 本 turn requestedT1;缺省全量)——裁剪是投影内部策略,不改变工具注册与执行语义
+- `projector.ts`:装配顺序固定(system → history → tools → self → resources),结果不可变;self 必含 clock/usage/cwd/permissions/skill 目录/session 身份,缺一即违宪;wake 与最近活动块必含(reason/重试/中断/切换);tools 注入按 Config `toolTierRules` 裁剪(T0 常驻 + tool_catalog 恒在 + 本 turn requestedT1;缺省全量)——裁剪是投影内部策略,不改变工具注册与执行语义
 - `history.ts`:thinking 块默认进历史(retention=normal),**超限截断 + 标记**(上限经 opts.maxThinkingBytes,缺省 32KB 与契约 ThinkingPolicySchema.maxBytes 一致;思路链保留头部防单块撑爆历史;全文压缩转摘要走压缩交换路径);artifact 块正文存 store(`artifacts.ts`),历史只放引用,检索按引用取——大载荷不烧上下文
 - `compaction.ts`:只做"摘要进/全文出",不裁剪用户意图,不删工具定义;按 `retention` 分级压缩(high 永不先丢 → normal → low);压缩发生时发事件 + 投影告警块("哪些被摘要化,可 retrieve");摘要文本由 enhance 策略产出,本包不内联摘要算法
-- `artifacts.ts`:artifact 按 id 存 store(store.artifacts 双驱动),正文不进事件流与投影;引用保留类型/大小/hash,按需检索(经 `artifact:read` 工具);text 块超阈值(缺省 16KB,可配)自动外置,压缩预算估算按引用 size 计入不因外置漏算
+- `artifacts.ts`:artifact 按 id 存 store(store.artifacts 双驱动),正文不进事件流与投影;引用保留类型/大小/hash,按需检索(经 `artifact_read` 工具);text 块超阈值(缺省 16KB,可配)自动外置,压缩预算估算按引用 size 计入不因外置漏算
 - `retrieve.ts`:查询结果必须标注来源(历史/摘要),LLM 可辨别
 - `epoch.ts`:epoch 单调递增,投影带版本,消费方(UI/评测)可对比
 - 归档双轨:快照 + 增量事件,重放可离线重建(当前全量事件重放 + 全量历史读取实现;**快照加速的 O(1) 起跳为性能目标,未落地——大会话为 O(n) 全扫,SPEC 明示现状**)

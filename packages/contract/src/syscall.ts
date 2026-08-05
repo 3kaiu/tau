@@ -80,9 +80,11 @@ export const CapabilityRuleSchema = z.object({
 export type CapabilityRule = z.infer<typeof CapabilityRuleSchema>
 
 /** SystemCall 契约。parameters 是 JSON Schema 对象(wire 契约,供 MCP 互操作与跨语言消费)。
+ * name 约束 `^[a-zA-Z0-9_-]+$`(OpenAI 兼容网关的公共工具名校验):冒号命名空间不可用,命名空间走下划线(如 memory_write)。
  * maxOutputTokens:调用前可知输出上限,与截断语义对齐;tier:工具分级。 */
+export const SYSTEM_CALL_NAME_PATTERN = "^[a-zA-Z0-9_-]+$"
 export const SystemCallSchema = z.object({
-  name: z.string(),
+  name: z.string().regex(new RegExp(SYSTEM_CALL_NAME_PATTERN)),
   description: z.string(),
   parameters: z.record(z.string(), z.unknown()),
   tier: z.enum(["T0", "T1", "T2"]).default("T1") satisfies z.ZodType<ToolTier>,

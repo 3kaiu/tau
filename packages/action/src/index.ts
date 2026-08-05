@@ -1,5 +1,5 @@
 // @tau/action — index.ts:createActionPlane。注册内置工具与 SystemCall 元数据,
-// 挂 capability 门(缺省规则:read/result/tool:catalog allow,write/bash ask)。
+// 挂 capability 门(缺省规则:read/result/tool_catalog allow,write/bash ask)。
 
 import type { Store } from "@tau/store"
 import { SystemCallSchema } from "@tau/contract"
@@ -134,7 +134,7 @@ export function createActionPlane(store: Store, opts: ActionPlaneOptions = {}): 
     },
     {
       syscall: {
-        name: "artifact:read",
+        name: "artifact_read",
         description: "按引用取回大载荷正文(artifact 外置块)。ref 来自历史中的 artifact 引用块(带 size/hash,超阈值文本自动外置)。",
         parameters: {
           type: "object",
@@ -145,7 +145,7 @@ export function createActionPlane(store: Store, opts: ActionPlaneOptions = {}): 
         },
         tier: "T0",
         dangerous: false,
-        defaultRule: { pattern: "artifact:read", rule: "allow", scope: "tool" },
+        defaultRule: { pattern: "artifact_read", rule: "allow", scope: "tool" },
       },
       executor: makeArtifactTool(store.artifacts),
     },
@@ -240,7 +240,7 @@ export function createActionPlane(store: Store, opts: ActionPlaneOptions = {}): 
     },
     {
       syscall: {
-        name: "tool:catalog",
+        name: "tool_catalog",
         description: "工具目录(含危险标记/tier/规则)。冷工具 = 未激活执行器的工具,调用会 rejected。",
         parameters: {
           type: "object",
@@ -250,7 +250,7 @@ export function createActionPlane(store: Store, opts: ActionPlaneOptions = {}): 
         },
         tier: "T0",
         dangerous: false,
-        defaultRule: { pattern: "tool:catalog", rule: "allow", scope: "tool" },
+        defaultRule: { pattern: "tool_catalog", rule: "allow", scope: "tool" },
       },
       executor: makeCatalogTool(plane.registry),
     },
@@ -290,7 +290,7 @@ export function createActionPlane(store: Store, opts: ActionPlaneOptions = {}): 
     },
     {
       syscall: {
-        name: "worktree:create",
+        name: "worktree_create",
         description: "内部:编排层工作树创建(仅 orchestrate 调用,不注入模型视野)。",
         parameters: {
           type: "object",
@@ -301,13 +301,13 @@ export function createActionPlane(store: Store, opts: ActionPlaneOptions = {}): 
         },
         tier: "T2",
         dangerous: false,
-        defaultRule: { pattern: "worktree:create", rule: "allow", scope: "tool" },
+        defaultRule: { pattern: "worktree_create", rule: "allow", scope: "tool" },
       },
       executor: makeWorktreeCreateTool(treeIndex),
     },
     {
       syscall: {
-        name: "worktree:rm",
+        name: "worktree_rm",
         description: "内部:编排层工作树清理(仅 orchestrate 调用,不注入模型视野)。",
         parameters: {
           type: "object",
@@ -318,18 +318,18 @@ export function createActionPlane(store: Store, opts: ActionPlaneOptions = {}): 
         },
         tier: "T2",
         dangerous: false,
-        defaultRule: { pattern: "worktree:rm", rule: "allow", scope: "tool" },
+        defaultRule: { pattern: "worktree_rm", rule: "allow", scope: "tool" },
       },
       executor: makeWorktreeRmTool(treeIndex),
     },
     {
       syscall: {
-        name: "worktree:list",
+        name: "worktree_list",
         description: "内部:枚举工作树(崩溃残留发现)。",
         parameters: { type: "object", properties: {} },
         tier: "T2",
         dangerous: false,
-        defaultRule: { pattern: "worktree:list", rule: "allow", scope: "tool" },
+        defaultRule: { pattern: "worktree_list", rule: "allow", scope: "tool" },
       },
       executor: makeWorktreeListTool(treeIndex),
     },

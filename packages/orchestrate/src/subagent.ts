@@ -14,7 +14,7 @@ import { createScheduler, type Scheduler, type TurnResult } from "./scheduler.ts
 
 /** 缺省能力面 = 只读集(与 opencode subagent 缺省一致:探索可,修改须显式声明)。
  * 不含 retrieve:executor 装配在父会话面,子代理检索会穿透父子隔离(隔离优先于便利)。 */
-export const SUBAGENT_DEFAULT_TOOLS = ["read", "grep", "find", "ls", "result", "tool:catalog", "ask_user", "skill_load"] as const
+export const SUBAGENT_DEFAULT_TOOLS = ["read", "grep", "find", "ls", "result", "tool_catalog", "ask_user", "skill_load"] as const
 
 export type SubagentOptions = {
   /** 全局并发上限(缺省 4)。 */
@@ -195,8 +195,8 @@ export async function runSubagent(
   const worktreeName = `${manifest.parentSessionId.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 24)}-${createHash("sha256").update(childId).digest("hex").slice(0, 8)}`
   let worktreeCwd: string | null = null
   try {
-    await deps.action.execute({ sessionId: manifest.parentSessionId, toolCallId: `sub-wt-${childId}`, name: "worktree:rm", args: { name: worktreeName } })
-    const created = await deps.action.execute({ sessionId: manifest.parentSessionId, toolCallId: `sub-wt-${childId}`, name: "worktree:create", args: { name: worktreeName } })
+    await deps.action.execute({ sessionId: manifest.parentSessionId, toolCallId: `sub-wt-${childId}`, name: "worktree_rm", args: { name: worktreeName } })
+    const created = await deps.action.execute({ sessionId: manifest.parentSessionId, toolCallId: `sub-wt-${childId}`, name: "worktree_create", args: { name: worktreeName } })
     if (created.ok && created.result.stdout !== null) worktreeCwd = created.result.stdout
   } catch {
     // 无工作树能力时退回父 cwd,隔离降级不阻断
@@ -269,9 +269,9 @@ export async function runSubagent(
   } finally {
     release(manifest.parentSessionId)
     try {
-      await deps.action.execute({ sessionId: manifest.parentSessionId, toolCallId: `sub-wt-${childId}`, name: "worktree:rm", args: { name: worktreeName } })
+      await deps.action.execute({ sessionId: manifest.parentSessionId, toolCallId: `sub-wt-${childId}`, name: "worktree_rm", args: { name: worktreeName } })
     } catch {
-      // 清理失败不阻断:worktree 残留可经 worktree:list 发现
+      // 清理失败不阻断:worktree 残留可经 worktree_list 发现
     }
   }
 }

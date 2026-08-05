@@ -3,7 +3,7 @@
 
 import { z } from "zod"
 
-/** 工具分级:T0 常驻每轮注入;T1 按需经 tool:catalog 查询后注入本 turn;
+/** 工具分级:T0 常驻每轮注入;T1 按需经 tool_catalog 查询后注入本 turn;
  * T2 内部机制(orchestrate/action 编排层专用,如 worktree),永不注入投影。 */
 export const ToolTierSchema = z.enum(["T0", "T1", "T2"])
 export type ToolTier = z.infer<typeof ToolTierSchema>

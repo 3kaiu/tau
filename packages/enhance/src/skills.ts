@@ -1,5 +1,5 @@
 // @tau/enhance - skills.ts:skill 注册表与目录装载。
-// 两级装载:目录级(名称+一句话)常驻 system;全文按需取(skill:load)。
+// 两级装载:目录级(名称+一句话)常驻 system;全文按需取(skill_load)。
 // 文件级装载走 LoaderCache(mtime/hash 增量):未变文件不重读不重解析。
 
 import { basename } from "node:path"
@@ -54,7 +54,7 @@ function parseSkillFile(file: string, raw: string): SkillEntry {
   }
 }
 
-/** skill:load -- 按名取全文。 */
+/** skill_load -- 按名取全文。 */
 export function getSkillText(catalog: SkillCatalog, name: string): string | null {
   const entry = catalog.entries.get(name)
   if (entry === undefined) return null
@@ -69,5 +69,5 @@ export function catalogBlock(catalog: SkillCatalog): string {
     if (entry === undefined) return `  - ${name}`
     return `  - ${name}: ${entry.description}`
   })
-  return `可用技能(用 skill:load 工具取全文):\n${lines.join("\n")}`
+  return `可用技能(用 skill_load 工具取全文):\n${lines.join("\n")}`
 }

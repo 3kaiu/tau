@@ -70,6 +70,22 @@ export function createTui(deps: TuiDeps): Tui {
     resolveStop = r
   })
 
+  let spinnerTimer: ReturnType<typeof setInterval> | null = null
+  function ensureSpinner(): void {
+    if (transcript.isStreaming() && spinnerTimer === null) {
+      spinnerTimer = setInterval(() => {
+        transcript.tick()
+        ui.requestRender()
+      }, 80)
+    }
+  }
+  function stopSpinner(): void {
+    if (spinnerTimer !== null) {
+      clearInterval(spinnerTimer)
+      spinnerTimer = null
+    }
+  }
+
   function adjustLayout(): void {
     const rows = terminal.rows
     const fixedOverhead = 1 + 1 + 1 + 3
@@ -103,8 +119,10 @@ export function createTui(deps: TuiDeps): Tui {
       snapshot: snap,
       pendingCount: snap.pendingSyscalls.length,
       activeGoals: snap.activeGoals.length,
-      busy: toolPanel.hasActivity(),
+      busy: transcript.isStreaming() || toolPanel.hasActivity(),
     })
+    ensureSpinner()
+    if (!transcript.isStreaming()) stopSpinner()
     ui.requestRender()
   }
 
@@ -193,6 +211,7 @@ export function createTui(deps: TuiDeps): Tui {
   function stop(): void {
     if (stopped) return
     stopped = true
+    stopSpinner()
     unsubscribe()
     permissionPopup.dismiss()
     ui.stop()

@@ -188,7 +188,7 @@ function prepare(options: ComposeOptions): Prep {
       })
     }
     memTool(
-      "memory:write",
+      "memory_write",
       "写入一条会话记忆(key → 内容)。overwrite: true 才允许覆盖已有 key,缺省拒绝(防误覆盖)。",
       {
         key: { type: "string", description: "记忆键(见投影记忆索引)" },
@@ -202,8 +202,8 @@ function prepare(options: ComposeOptions): Prep {
       },
     )
     memTool(
-      "memory:read",
-      "读取一条会话记忆全文。key 来自投影记忆索引或 memory:list。",
+      "memory_read",
+      "读取一条会话记忆全文。key 来自投影记忆索引或 memory_list。",
       { key: { type: "string" } },
       ["key"],
       (req) => {
@@ -213,7 +213,7 @@ function prepare(options: ComposeOptions): Prep {
       },
     )
     memTool(
-      "memory:search",
+      "memory_search",
       "检索会话记忆(key/内容命中 + 时间衰减,缺省前 5 条)。",
       { query: { type: "string" }, limit: { type: "integer", description: "返回条数上限(缺省 5)" } },
       ["query"],
@@ -224,7 +224,7 @@ function prepare(options: ComposeOptions): Prep {
       },
     )
     memTool(
-      "memory:list",
+      "memory_list",
       "枚举会话记忆(更新序倒序,最新在前)。",
       {},
       [],
@@ -235,7 +235,7 @@ function prepare(options: ComposeOptions): Prep {
       },
     )
     memTool(
-      "memory:forget",
+      "memory_forget",
       "删除一条会话记忆。",
       { key: { type: "string" } },
       ["key"],
@@ -246,19 +246,19 @@ function prepare(options: ComposeOptions): Prep {
     )
   }
 
-  // artifact:list syscall -- 枚举会话已外置的 artifact(executor 在 finishRuntime 闭包就绪后覆盖)
+  // artifact_list syscall -- 枚举会话已外置的 artifact(executor 在 finishRuntime 闭包就绪后覆盖)
   {
     const artifactListSchema = SystemCallSchema.parse({
-      name: "artifact:list",
-      description: "枚举本会话已外置的 artifact 引用(ref/size/hash/mime;正文经 artifact:read 按 ref 取回)。",
+      name: "artifact_list",
+      description: "枚举本会话已外置的 artifact 引用(ref/size/hash/mime;正文经 artifact_read 按 ref 取回)。",
       parameters: { type: "object", properties: {}, required: [] },
       tier: "T0",
       dangerous: false,
-      defaultRule: { pattern: "artifact:list", rule: "allow", scope: "tool" },
+      defaultRule: { pattern: "artifact_list", rule: "allow", scope: "tool" },
     })
     registerSyscall(artifactListSchema, async () => ({
       exitCode: 1,
-      stdout: "artifact:list 执行器未就绪(compose 装配未完成)",
+      stdout: "artifact_list 执行器未就绪(compose 装配未完成)",
       stderr: null,
       truncated: false,
       totalPages: 1,
@@ -266,10 +266,10 @@ function prepare(options: ComposeOptions): Prep {
     }))
   }
 
-  // subagent:run syscall -- 多代理委派(元数据先注册进投影;executor 在 finishRuntime 闭包就绪后覆盖)
+  // subagent_run syscall -- 多代理委派(元数据先注册进投影;executor 在 finishRuntime 闭包就绪后覆盖)
   {
     const subagentSchema = SystemCallSchema.parse({
-      name: "subagent:run",
+      name: "subagent_run",
       description: "委派子代理执行任务(独立子会话 + 独立工作树;缺省只读能力面,修改类操作须显式声明 tools 白名单;结果截断回传,完整产出留在子会话)。",
       parameters: {
         type: "object",
@@ -284,11 +284,11 @@ function prepare(options: ComposeOptions): Prep {
       },
       tier: "T0",
       dangerous: true,
-      defaultRule: { pattern: "subagent:run", rule: "ask", scope: "tool" },
+      defaultRule: { pattern: "subagent_run", rule: "ask", scope: "tool" },
     })
     registerSyscall(subagentSchema, async () => ({
       exitCode: 1,
-      stdout: "subagent:run 执行器未就绪(compose 装配未完成)",
+      stdout: "subagent_run 执行器未就绪(compose 装配未完成)",
       stderr: null,
       truncated: false,
       totalPages: 1,
@@ -389,10 +389,10 @@ function finishRuntime(prep: Prep, mcpEvents: readonly Event[]): TauRuntime {
   )
   bridges.scheduler = (event) => scheduler.notify(event)
 
-  // 调度器自产事件(recent 种类:retry/interrupted/model_switched)→ 事件日志持久化。
+  // 调度器自产事件(recent 种类:retry/interrupted/model_switched + 流式增量 text_delta)→ 事件日志持久化。
   // 只持久化 session 不自产的种类,防双写(compression/recovery 由 session 自持)。
   scheduler.subscribe((event) => {
-    if (event.kind === "retry" || event.kind === "interrupted" || event.kind === "model_switched") {
+    if (event.kind === "retry" || event.kind === "interrupted" || event.kind === "model_switched" || event.kind === "text_delta") {
       store.events.append(sessionId, event)
     }
   })
@@ -408,18 +408,18 @@ function finishRuntime(prep: Prep, mcpEvents: readonly Event[]): TauRuntime {
     return { exitCode: 0, stdout: `${results.length}/${total} 命中\n${lines.join("\n")}`, stderr: null, truncated: false, totalPages: 1, page: 0 }
   })
 
-  // artifact:list executor 就绪(枚举会话 artifact 引用,正文仍走 artifact:read)
-  action.registerExecutor("artifact:list", async () => {
+  // artifact_list executor 就绪(枚举会话 artifact 引用,正文仍走 artifact_read)
+  action.registerExecutor("artifact_list", async () => {
     const metas = session.listArtifacts()
     if (metas.length === 0) return { exitCode: 0, stdout: "0 个 artifact", stderr: null, truncated: false, totalPages: 1, page: 0 }
     const lines = metas.map((m) => `- ${m.ref} size=${m.size} hash=${m.hash.slice(0, 8)}${m.mime !== undefined ? ` mime=${m.mime}` : ""}`)
     return { exitCode: 0, stdout: `${metas.length} 个 artifact\n${lines.join("\n")}`, stderr: null, truncated: false, totalPages: 1, page: 0 }
   })
 
-  // subagent:run executor 就绪(闭包 kernel/session;多代理委派经 orchestrate 唯一出口)
-  action.registerExecutor("subagent:run", async (req) => {
+  // subagent_run executor 就绪(闭包 kernel/session;多代理委派经 orchestrate 唯一出口)
+  action.registerExecutor("subagent_run", async (req) => {
     const task = String(req.args.task ?? "")
-    if (task === "") return { exitCode: 1, stdout: "subagent:run 缺 task", stderr: null, truncated: false, totalPages: 1, page: 0 }
+    if (task === "") return { exitCode: 1, stdout: "subagent_run 缺 task", stderr: null, truncated: false, totalPages: 1, page: 0 }
     const result = await runSubagent(
       { llm: kernel, store, action, session },
       {

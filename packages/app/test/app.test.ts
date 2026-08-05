@@ -1,7 +1,7 @@
 // @tau/app — compose 端到端(注入 fake llm,跑真实回路:face → orchestrate → action)。
 
 import { describe, expect, it } from "vitest"
-import type { LlmCollectResult, LlmKernel } from "@tau/llm"
+import type { LlmCollectResult, LlmEvent, LlmKernel } from "@tau/llm"
 import { createMemoryStore } from "@tau/store"
 import { defaultCatalog } from "@tau/llm"
 import { compose } from "../src/compose.ts"
@@ -12,7 +12,7 @@ import { join } from "node:path"
 
 function fakeLlm(): LlmKernel {
   let calls = 0
-  const complete = async (): Promise<LlmCollectResult> => {
+  const next = async (): Promise<LlmCollectResult> => {
     calls++
     if (calls === 1) {
       return { text: "", thinking: "", toolCalls: [{ id: "t1", name: "read", args: { path: "pkg.json" } }], usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 }, finishReason: "tool-calls", error: undefined, aborted: false }
@@ -20,8 +20,10 @@ function fakeLlm(): LlmKernel {
     return { text: "版本是 0.0.1", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop", error: undefined, aborted: false }
   }
   return {
-    stream: async function* () {},
-    complete,
+    stream: async function* () {
+      yield* streamFrom(await next())
+    },
+    complete: next,
     models: () => [],
     getModel: () => null,
     features: () => ({ streaming: true, tools: true, thinking: false, vision: false }),
@@ -29,6 +31,22 @@ function fakeLlm(): LlmKernel {
     cachePolicy: () => ({ mode: "off", ttlMs: 0 }),
     refresh: () => {},
   }
+}
+
+/** LlmCollectResult → 事件流:scheduler 走 stream(),假 LLM 必须能产出增量事件。 */
+async function* streamFrom(result: LlmCollectResult): AsyncGenerator<LlmEvent> {
+  if (result.error) {
+    yield { type: "error", code: result.error.code, message: result.error.message, retryable: result.error.retryable }
+    return
+  }
+  if (result.aborted) {
+    yield { type: "aborted" }
+    return
+  }
+  if (result.thinking) yield { type: "thinking-delta", text: result.thinking }
+  if (result.text) yield { type: "text-delta", text: result.text }
+  for (const tc of result.toolCalls ?? []) yield { type: "tool-call", id: tc.id, name: tc.name, args: tc.args }
+  yield { type: "finish", finishReason: result.finishReason ?? "stop", usage: result.usage }
 }
 
 describe("app:compose 端到端回路", () => {
@@ -95,7 +113,7 @@ describe("app:compose 端到端回路", () => {
     }
   })
 
-  it("retrieve 接历史检索:归档全文可回源;artifact:list 枚举引用", async () => {
+  it("retrieve 接历史检索:归档全文可回源;artifact_list 枚举引用", async () => {
     const dir = `/tmp/tau-retr-${Date.now()}`
     mkdirSync(dir, { recursive: true })
     const store = createMemoryStore()
@@ -109,13 +127,13 @@ describe("app:compose 端到端回路", () => {
       createdAt: new Date().toISOString(),
     })
     runtime.store.messages.archive(dir.length ? "main" : "main", ["m-arch"])
-    // artifact:list → 空
-    const list0 = await runtime.action.execute({ sessionId: "main", toolCallId: "a1", name: "artifact:list", args: {}, cwd: dir })
+    // artifact_list → 空
+    const list0 = await runtime.action.execute({ sessionId: "main", toolCallId: "a1", name: "artifact_list", args: {}, cwd: dir })
     expect(list0.ok).toBe(true)
     if (list0.ok) expect(list0.result.stdout).toContain("0 个 artifact")
     // 外置一个 artifact(经 session 存储面)
     const art = runtime.session.storeArtifact({ content: "大载荷正文内容" })
-    const list1 = await runtime.action.execute({ sessionId: "main", toolCallId: "a2", name: "artifact:list", args: {}, cwd: dir })
+    const list1 = await runtime.action.execute({ sessionId: "main", toolCallId: "a2", name: "artifact_list", args: {}, cwd: dir })
     expect(list1.ok).toBe(true)
     if (list1.ok) expect(list1.result.stdout).toContain(art.ref)
     // retrieve 命中归档全文
@@ -223,7 +241,7 @@ describe("app:compose 端到端回路", () => {
     const names = runtime.session.project().tools.map((t) => t.name)
     expect(names).toContain("read")
     expect(names).toContain("ls")
-    expect(names).toContain("tool:catalog")
+    expect(names).toContain("tool_catalog")
     expect(names).not.toContain("bash")
     expect(names).not.toContain("grep")
 
@@ -295,26 +313,26 @@ describe("app:compose 端到端回路", () => {
       plane.execute({ sessionId: "main", toolCallId: callId, name, args, cwd: "/tmp/tau-test" })
 
     // 写入记忆(经 execute,审计)
-    const wrote = await exec("memory:write", { key: "偏好", content: "简洁回复" }, "m1")
+    const wrote = await exec("memory_write", { key: "偏好", content: "简洁回复" }, "m1")
     expect(wrote.ok).toBe(true)
 
     // 覆盖保护:缺省拒绝,overwrite 放行
-    const denied = await exec("memory:write", { key: "偏好", content: "覆盖" }, "m2")
+    const denied = await exec("memory_write", { key: "偏好", content: "覆盖" }, "m2")
     if (denied.ok) expect(denied.result!.stdout).toContain("拒绝覆盖")
-    const forced = await exec("memory:write", { key: "偏好", content: "覆盖后", overwrite: true }, "m2b")
+    const forced = await exec("memory_write", { key: "偏好", content: "覆盖后", overwrite: true }, "m2b")
     if (forced.ok) expect(forced.result!.stdout).toContain("已写入")
 
     // 读全文 + 检索 + 枚举
-    const read = await exec("memory:read", { key: "偏好" }, "m3")
+    const read = await exec("memory_read", { key: "偏好" }, "m3")
     if (read.ok) expect(read.result!.stdout).toBe("覆盖后")
-    const search = await exec("memory:search", { query: "覆盖" }, "m4")
+    const search = await exec("memory_search", { query: "覆盖" }, "m4")
     if (search.ok) expect(search.result!.stdout).toContain("[偏好]")
-    const list = await exec("memory:list", {}, "m5")
+    const list = await exec("memory_list", {}, "m5")
     if (list.ok) expect(list.result!.stdout).toContain("- [偏好]")
 
     // 审计落盘
     const audit = runtime.store.audit.query({ sessionId: "main" })
-    expect(audit.some((a) => a.action.startsWith("memory:write"))).toBe(true)
+    expect(audit.some((a) => a.action.startsWith("memory_write"))).toBe(true)
 
     // 两级装载:索引块在会话创建/恢复时刷新(写入前创建的投影不含,重建后含)
     expect(runtime.session.project().system.find((b) => b.kind === "memory")).toBeUndefined()
@@ -326,7 +344,7 @@ describe("app:compose 端到端回路", () => {
     runtime.session.close()
   })
 
-  it("subagent:run syscall:委派子代理,结果回传,子会话落 store", async () => {
+  it("subagent_run syscall:委派子代理,结果回传,子会话落 store", async () => {
     const runtime = compose({ llm: fakeLlm(), cwd: "/tmp/tau-test", workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
     // 子代理视角的 llm 与父相同(fakeLlm 调用计数独立)
     const plane = runtime.action as unknown as { execute: (req: { sessionId: string; toolCallId: string; name: string; args: Record<string, unknown>; cwd?: string }) => Promise<{ ok: boolean; result?: { stdout: string }; error?: { code: string } }> }
@@ -334,7 +352,7 @@ describe("app:compose 端到端回路", () => {
     const outcome = await plane.execute({
       sessionId: "main",
       toolCallId: "s1",
-      name: "subagent:run",
+      name: "subagent_run",
       args: { task: "调查文件结构" },
       cwd: "/tmp/tau-test",
     })

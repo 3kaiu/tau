@@ -14,8 +14,8 @@
 - `tau sessions list|show|resume|archive|delete` - 会话治理(M9 支柱 C;delete = archive,不物理删;需 `--store` 才有持久记录)
 - `tau config list|get <k>|set <k> <v>|unset <k>` - 配置读写(落 store.kv,拒明文 secrets)
 - MCP:`TAU_MCP_SERVERS` JSON 声明 server 列表(stdio command/args 或 http url+headers,id 为工具名前缀);工具注册为 `mcp_<id>_<tool>` syscall,经 action.execute 审批/审计/截断(不绕行);每 server 可配 defaultRule(pattern 需通配,如 `mcp_demo_*`,装载进能力门,缺省 ask);注册先于 session 创建(投影 tools 快照含 MCP 工具)→ 生产走 composeAsync;进程退出前 `runtime.mcpDispose()` 关闭 client(stdio 子进程句柄不释放会阻塞退出)
-- 记忆 syscall 面(M11):`memory:write/read/search/list/forget` 五个 T0 工具(缺省 allow,经 action.execute 审计;write 缺省拒绝覆盖已有 key,`overwrite: true` 放行);后端 = enhance 记忆(store.kv 持久,可跨会话续用);assemble 调 `enhancer.apply(sessionId)` 生成记忆索引块(两级装载快照)
-- 子代理委派(M12):`subagent:run` syscall(T0 危险工具,缺省 ask;task 必填,context/tools/background/maxTurns 可选);executor 闭包 kernel/session/store/action 经 orchestrate `runSubagent` 派生子会话(能力面白名单递减缺省只读、独立工作树、结果截断回传);元数据在 prepare 注册(投影可见),executor 在 finishRuntime 就绪后覆盖
+- 记忆 syscall 面(M11):`memory_write/read/search/list/forget` 五个 T0 工具(缺省 allow,经 action.execute 审计;write 缺省拒绝覆盖已有 key,`overwrite: true` 放行);后端 = enhance 记忆(store.kv 持久,可跨会话续用);assemble 调 `enhancer.apply(sessionId)` 生成记忆索引块(两级装载快照)
+- 子代理委派(M12):`subagent_run` syscall(T0 危险工具,缺省 ask;task 必填,context/tools/background/maxTurns 可选);executor 闭包 kernel/session/store/action 经 orchestrate `runSubagent` 派生子会话(能力面白名单递减缺省只读、独立工作树、结果截断回传);元数据在 prepare 注册(投影可见),executor 在 finishRuntime 就绪后覆盖
 - 上下文压缩:compose 把 enhance.summarize 注入 scheduler 的 compact 策略(历史超预算自动摘要化,用户输入永不丢)
 - `tau schedule list|add <cron> <目标>|rm <id>|run [--dry-run]` - 定时目标(orchestrate cron 治理面;`run` 是一次性检查,由系统 cron 每分钟拉起,tau 不常驻守护进程)
 - `tau eval` - 运行行为评测(委托 eval 包)

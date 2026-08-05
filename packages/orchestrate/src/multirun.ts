@@ -62,8 +62,8 @@ export async function runMultiRun(
       const worktreeName = `${parent.sessionId.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 24)}-${createHash("sha256").update(childId).digest("hex").slice(0, 8)}`
       let worktreeCwd = parentProj.self.cwd
       try {
-        await deps.action.execute({ sessionId: parent.sessionId, toolCallId: `wt-${childId}`, name: "worktree:rm", args: { name: worktreeName } })
-        const created = await deps.action.execute({ sessionId: parent.sessionId, toolCallId: `wt-${childId}`, name: "worktree:create", args: { name: worktreeName } })
+        await deps.action.execute({ sessionId: parent.sessionId, toolCallId: `wt-${childId}`, name: "worktree_rm", args: { name: worktreeName } })
+        const created = await deps.action.execute({ sessionId: parent.sessionId, toolCallId: `wt-${childId}`, name: "worktree_create", args: { name: worktreeName } })
         if (created.ok && created.result.stdout !== null) worktreeCwd = created.result.stdout
       } catch {
         // 无工作树能力(未绑定根/执行器缺省)时退回父会话 cwd,隔离降级不阻断运行
@@ -87,9 +87,9 @@ export async function runMultiRun(
         return { model, sessionId: childId, result, events, cwd: worktreeCwd }
       } finally {
         child.close()
-        // 清理失败不抛:残留由下一次 worktree:create 前的 rm 接管,单 run 异常不覆灭整批
+        // 清理失败不抛:残留由下一次 worktree_create 前的 rm 接管,单 run 异常不覆灭整批
         try {
-          await deps.action.execute({ sessionId: parent.sessionId, toolCallId: `wt-${childId}`, name: "worktree:rm", args: { name: worktreeName } })
+          await deps.action.execute({ sessionId: parent.sessionId, toolCallId: `wt-${childId}`, name: "worktree_rm", args: { name: worktreeName } })
         } catch {
           /* 降级:允许残留,下次 rm 清理 */
         }

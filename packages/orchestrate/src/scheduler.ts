@@ -3,7 +3,7 @@
 // turn 是原子单位;任何中断是状态机输入;重试/打断/循环全可见可审计。
 
 import { createEventIdGenerator, estimateTokens, type ContextProjection, type Event, type Goal, type Message, type SenderKind, type WakeReason } from "@tau/contract"
-import type { LlmKernel, LlmCollectResult, LlmRequest } from "@tau/llm"
+import { collectStream, type LlmEvent, type LlmKernel, type LlmCollectResult, type LlmRequest } from "@tau/llm"
 import type { Session } from "@tau/session"
 import type { ActionPlane } from "@tau/action"
 import { GoalJudge } from "./goals.ts"
@@ -119,6 +119,52 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
     }
   }
 
+  // ---- 流式增量发射:LLM 生成中实时可见(transcript 仍是真相源)----
+  const DELTA_FLUSH_CHARS = 40
+  let deltaBuf = ""
+  let deltaThinking = false
+  let deltaDirty = false
+
+  function flushDelta(): void {
+    if (!deltaDirty) return
+    emitRaw({ kind: "text_delta", text: deltaBuf, thinking: deltaThinking })
+    deltaBuf = ""
+    deltaDirty = false
+  }
+
+  /** 迭代 kernel 流,边收边发 text_delta 增量,返回与 complete() 同构的聚合结果。 */
+  async function completeStreaming(sig: AbortSignal): Promise<LlmCollectResult> {
+    const all: LlmEvent[] = []
+    for await (const event of deps.llm.stream(session.project(), llmRequest(), sig)) {
+      all.push(event)
+      switch (event.type) {
+        case "model-switched":
+          emitRaw({ kind: "model_switched", from: event.from, to: event.to, reason: "fallback" })
+          break
+        case "text-delta":
+          if (deltaDirty && deltaThinking) flushDelta()
+          deltaBuf += event.text
+          deltaThinking = false
+          deltaDirty = true
+          if (deltaBuf.length >= DELTA_FLUSH_CHARS) flushDelta()
+          break
+        case "thinking-delta":
+          if (deltaDirty && !deltaThinking) flushDelta()
+          deltaBuf += event.text
+          deltaThinking = true
+          deltaDirty = true
+          if (deltaBuf.length >= DELTA_FLUSH_CHARS) flushDelta()
+          break
+        default:
+          break
+      }
+    }
+    flushDelta()
+    return collectStream(async function* () {
+      yield* all
+    }())
+  }
+
   async function runTurn(input: SchedulerInput): Promise<TurnResult> {
     steerEpoch++
     const myEpoch = steerEpoch
@@ -155,18 +201,18 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
 
       let result: LlmCollectResult
       try {
-        result = await runWithTimeout(() => deps.llm.complete(session.project(), llmRequest(), signal), maxTurnMs)
+        result = await runWithTimeout(() => completeStreaming(signal), maxTurnMs)
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         lastError = msg
         emitRaw({ kind: "retry", cause: `turn 异常(${msg})`, attempts: 0 })
-        appendAssistant(`(turn 异常:${msg})`, [], false)
+        appendAssistant(`(turn 异常:${msg})`, "", [], false)
         break
       }
 
       if (signal.aborted || result.aborted) {
         emitRaw({ kind: "interrupted", targetId: result.finishReason ?? "llm" })
-        appendAssistant(result.text, result.toolCalls, true)
+        appendAssistant(result.text, result.thinking, result.toolCalls, true)
         return { turns, text, toolCalls, aborted: true, error: lastError }
       }
 
@@ -175,7 +221,7 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
         if (currentError.retryable && maxRetries > 0) {
           for (let attempt = 1; attempt <= maxRetries; attempt++) {
             emitRaw({ kind: "retry", cause: currentError.message, attempts: attempt })
-            const again = await deps.llm.complete(session.project(), llmRequest(), signal)
+            const again = await completeStreaming(signal)
             result = again
             if (again.error === undefined) {
               currentError = undefined
@@ -186,7 +232,7 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
         }
         if (currentError !== undefined) {
           lastError = currentError.message
-          appendAssistant(`(模型调用失败:${currentError.message})`, [], false)
+          appendAssistant(`(模型调用失败:${currentError.message})`, "", [], false)
           break
         }
       }
@@ -205,7 +251,7 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
       const calls = result.toolCalls.slice(0, maxToolCallsPerTurn)
       const truncatedCalls = result.toolCalls.slice(maxToolCallsPerTurn)
       // 工具阶段截断(steer immediate 在飞工具中止后):与 llm 阶段中断同形态,assistant 消息标 interrupted
-      appendAssistant(result.text, calls, signal.aborted)
+      appendAssistant(result.text, result.thinking, calls, signal.aborted)
       if (truncatedCalls.length > 0) {
         // 超限静默删调 → 被删调用全部落显式 rejected 结果(模型可区分"被拦截"与"结果丢失")
         lastError = `工具调用超限:一轮最多 ${maxToolCallsPerTurn} 次(拦截 ${truncatedCalls.length} 个)`
@@ -279,11 +325,15 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
     return { turns, text, toolCalls, aborted: signal.aborted, error: lastError }
   }
 
-  function appendAssistant(textIn: string, calls: { id: string; name: string; args: unknown }[], interrupted: boolean): void {
+  function appendAssistant(textIn: string, thinkingIn: string, calls: { id: string; name: string; args: unknown }[], interrupted: boolean): void {
+    // thinking 必须先于 text 落块:wire 侧 reasoning_content 在 content 之前,且推理模型要求上一轮 reasoning 原样回传(不落 = 网关拒收)
+    const content: Message["content"] = []
+    if (thinkingIn !== "") content.push({ type: "thinking", text: thinkingIn })
+    if (textIn !== "") content.push({ type: "text", text: textIn })
     const message: Message = {
       id: uuid(),
       role: "assistant",
-      content: textIn === "" ? [] : [{ type: "text", text: textIn }],
+      content,
       toolCalls: calls.map((c) => ({ id: c.id, name: c.name, arguments: (c.args ?? {}) as Record<string, unknown> })),
       toolResults: [],
       interrupted,

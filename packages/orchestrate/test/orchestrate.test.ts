@@ -6,18 +6,36 @@ import { createMemoryStore } from "@tau/store"
 import { createSession, type Session } from "@tau/session"
 import type { ContextProjection, Event, Message, SystemCall } from "@tau/contract"
 import { toolResult, toolError } from "@tau/contract"
-import type { LlmCollectResult, LlmKernel, LlmRequest } from "@tau/llm"
+import type { LlmCollectResult, LlmEvent, LlmKernel, LlmRequest } from "@tau/llm"
 import { createActionPlane, type ActionPlane } from "@tau/action"
 import { createScheduler, runSubagent, depthOf, listSubagents, subagentUsage, SUBAGENT_DEFAULT_TOOLS } from "../src/index.ts"
 
 type LlmBehavior = (calls: number) => LlmCollectResult
 
+/** LlmCollectResult → 事件流:scheduler 已改走 stream(),假 LLM 必须能产出增量事件。 */
+async function* streamFrom(result: LlmCollectResult): AsyncGenerator<LlmEvent> {
+  if (result.error) {
+    yield { type: "error", code: result.error.code, message: result.error.message, retryable: result.error.retryable }
+    return
+  }
+  if (result.aborted) {
+    yield { type: "aborted" }
+    return
+  }
+  if (result.thinking) yield { type: "thinking-delta", text: result.thinking }
+  if (result.text) yield { type: "text-delta", text: result.text }
+  for (const tc of result.toolCalls ?? []) yield { type: "tool-call", id: tc.id, name: tc.name, args: tc.args }
+  yield { type: "finish", finishReason: result.finishReason ?? "stop", usage: result.usage }
+}
+
 function fakeLlm(behavior: LlmBehavior): LlmKernel {
   let calls = 0
-  const complete = async (): Promise<LlmCollectResult> => behavior(calls++)
+  const next = (): LlmCollectResult => behavior(calls++)
   return {
-    stream: async function* () {},
-    complete,
+    stream: async function* () {
+      yield* streamFrom(next())
+    },
+    complete: async () => next(),
     models: () => [],
     getModel: () => null,
     features: () => ({ streaming: true, tools: true, thinking: false, vision: false }),
@@ -321,7 +339,10 @@ describe("orchestrate:预算强制(P1-4)", () => {
     const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
     let calls = 0
     const llm: LlmKernel = {
-      stream: async function* () {},
+      stream: async function* () {
+        calls++
+        yield* streamFrom({ text: "超预算输出", thinking: "", toolCalls: [], usage: { promptTokens: 100, completionTokens: 100, totalTokens: 200 }, finishReason: "stop", error: undefined, aborted: false })
+      },
       complete: async (): Promise<LlmCollectResult> => {
         calls++
         // 每轮返回 200 tokens 的真实用量(一次就超 100 上限)
@@ -349,7 +370,10 @@ describe("orchestrate:prompt busy 守卫(P0-4)", () => {
     const session = createSession({ store, sessionId: "s1", cwd: "/tmp/tau-test", workspaceRoots: ["/tmp/tau-test"] })
     const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
     const slowLlm: LlmKernel = {
-      stream: async function* () {},
+      stream: async function* () {
+        await gate
+        yield* streamFrom({ text: "done", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop", error: undefined, aborted: false })
+      },
       complete: async () => {
         await gate
         return { text: "done", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop", error: undefined, aborted: false }
@@ -370,15 +394,15 @@ describe("orchestrate:prompt busy 守卫(P0-4)", () => {
 })
 
 describe("orchestrate:model_switched 构造点", () => {
-  it("llm onEvent(model-switched)→ scheduler 发 model_switched 契约事件", async () => {
+  it("kernel 流 model-switched → scheduler 发 model_switched 契约事件", async () => {
     const { store, session } = freshSession()
     const events: Event[] = []
     const base = fakeLlm(() => ({ text: "done", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop" as const, error: undefined, aborted: false }))
     const llm: LlmKernel = {
       ...base,
-      complete: async (_p, req?: LlmRequest) => {
-        req?.onEvent?.({ type: "model-switched", from: "A", to: "B" })
-        return { text: "done", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop", error: undefined, aborted: false }
+      stream: async function* () {
+        yield { type: "model-switched", from: "A", to: "B" }
+        yield* streamFrom({ text: "done", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop", error: undefined, aborted: false })
       },
     }
     const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })

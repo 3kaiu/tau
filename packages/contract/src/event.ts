@@ -115,6 +115,15 @@ export const GoalEventSchema = EventBaseSchema.extend({
 })
 export type GoalEvent = z.infer<typeof GoalEventSchema>
 
+/** 流式输出增量(LLM 生成中实时可见;真相源仍是最终 transcript 事件,增量只是预览)。
+ * thinking: true 表示思考通道增量(wire = reasoning_content)。批量合并发射,非每 token 一条。 */
+export const TextDeltaEventSchema = EventBaseSchema.extend({
+  kind: z.literal("text_delta"),
+  text: z.string(),
+  thinking: z.boolean().default(false),
+})
+export type TextDeltaEvent = z.infer<typeof TextDeltaEventSchema>
+
 /** Event 封闭联合:新增分支必须同时改本联合与 invariant 检查器(编译期穷尽)。 */
 export const EventSchema = z.discriminatedUnion("kind", [
   InputAcceptedEventSchema,
@@ -130,6 +139,7 @@ export const EventSchema = z.discriminatedUnion("kind", [
   InterruptedEventSchema,
   RecoveryEventSchema,
   GoalEventSchema,
+  TextDeltaEventSchema,
 ])
 export type Event = z.infer<typeof EventSchema>
 

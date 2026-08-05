@@ -59,11 +59,11 @@ export type ProjectorInput = {
   clock: Clock
   budgetAlarm: boolean
   recoveryNotice: string | null
-  /** 本 turn 已注入的 T1 工具名(经 tool:catalog 发现后按需请求);仅 toolTierRules 存在时生效。 */
+  /** 本 turn 已注入的 T1 工具名(经 tool_catalog 发现后按需请求);仅 toolTierRules 存在时生效。 */
   requestedT1?: readonly string[]
 }
 
-/** 工具注入裁剪:T2(内部机制)永不注入;无 tier 规则 → 其余全量注入;有 → T0 常驻 + 本 turn 请求过的 T1 + tool:catalog(发现入口)恒在。 */
+/** 工具注入裁剪:T2(内部机制)永不注入;无 tier 规则 → 其余全量注入;有 → T0 常驻 + 本 turn 请求过的 T1 + tool_catalog(发现入口)恒在。 */
 function injectedTools(opts: ProjectorOptions, input: ProjectorInput): SystemCall[] {
   if (opts.toolTierRules === undefined) return [...opts.tools].filter((tool) => tool.tier !== "T2")
   const { overrides, defaultTier } = opts.toolTierRules
@@ -71,7 +71,7 @@ function injectedTools(opts: ProjectorOptions, input: ProjectorInput): SystemCal
   return opts.tools.filter((tool) => {
     if (tool.tier === "T2") return false
     const effectiveTier = overrides[tool.name] ?? tool.tier ?? defaultTier
-    return effectiveTier === "T0" || requested.has(tool.name) || tool.name === "tool:catalog"
+    return effectiveTier === "T0" || requested.has(tool.name) || tool.name === "tool_catalog"
   })
 }
 

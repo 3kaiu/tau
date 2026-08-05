@@ -1,4 +1,4 @@
-// @tau/action — tools/catalog.ts:tool:catalog 工具。返回完整内置目录(含冷工具与注册规则),
+// @tau/action — tools/catalog.ts:tool_catalog 工具。返回完整内置目录(含冷工具与注册规则),
 // 冷工具 = 未注册执行器或未允许规则的工具,模型据此了解"能用什么、要什么授权"。
 
 import { toolError, toolResult } from "@tau/contract"

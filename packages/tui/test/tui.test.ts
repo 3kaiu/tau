@@ -99,7 +99,7 @@ describe("prompt:parseInput", () => {
       expect(r.command.kind).toBe("prompt")
       if (r.command.kind === "prompt") {
         expect(r.command.text).toContain("greet")
-        expect(r.command.text).toContain("skill:load")
+        expect(r.command.text).toContain("skill_load")
       }
     }
   })

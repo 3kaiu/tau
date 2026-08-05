@@ -151,7 +151,7 @@ describe("action 平面:补齐工具面(edit/grep/find/ls/ask_user/system/catalo
   it("工具目录:17 内置工具齐全(14 模型可见 + 3 worktree 内部件)", () => {
     const { plane } = fresh()
     const names = plane.registry.all().map((t) => t.name).sort()
-    expect(names).toEqual(["artifact:read", "ask_user", "bash", "edit", "fetch", "find", "grep", "ls", "read", "result", "retrieve", "system", "tool:catalog", "worktree:create", "worktree:list", "worktree:rm", "write"].sort())
+    expect(names).toEqual(["artifact_read", "ask_user", "bash", "edit", "fetch", "find", "grep", "ls", "read", "result", "retrieve", "system", "tool_catalog", "worktree_create", "worktree_list", "worktree_rm", "write"].sort())
   })
 
   it("edit:old→new 原子替换 + fileMeta", async () => {
@@ -236,9 +236,9 @@ describe("action 平面:补齐工具面(edit/grep/find/ls/ask_user/system/catalo
     if (cancel.ok) expect(cancel.result.stdout).toContain("不存在")
   })
 
-  it("tool:catalog:detail 模式含参数 schema", async () => {
+  it("tool_catalog:detail 模式含参数 schema", async () => {
     const { plane } = fresh()
-    const out = await plane.execute({ sessionId: "s", toolCallId: "t0", name: "tool:catalog", args: { detail: true } })
+    const out = await plane.execute({ sessionId: "s", toolCallId: "t0", name: "tool_catalog", args: { detail: true } })
     expect(out.ok).toBe(true)
     if (out.ok) expect(out.result.stdout).toContain("params:")
   })
@@ -423,22 +423,22 @@ describe("action 平面:executeStream 流式事件形态(P1-22)", () => {
   })
 })
 
-describe("action 平面:artifact:read 检索工具(M10.3-b)", () => {
+describe("action 平面:artifact_read 检索工具(M10.3-b)", () => {
   it("外置正文按引用取回;缺 ref 拒绝;不存在 not_found", async () => {
     const store = createMemoryStore()
     const plane = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
     const big = "z".repeat(2_000)
     store.artifacts.put({ ref: "art-abc123", sessionId: "s", size: big.length, hash: "h", body: big, createdAt: new Date().toISOString() })
 
-    const got = await plane.execute({ sessionId: "s", toolCallId: "a1", name: "artifact:read", args: { ref: "art-abc123" }, cwd: "/tmp/tau-test" })
+    const got = await plane.execute({ sessionId: "s", toolCallId: "a1", name: "artifact_read", args: { ref: "art-abc123" }, cwd: "/tmp/tau-test" })
     expect(got.ok).toBe(true)
     if (got.ok) expect(got.result.stdout).toBe(big)
 
-    const missing = await plane.execute({ sessionId: "s", toolCallId: "a2", name: "artifact:read", args: { ref: "art-nope" }, cwd: "/tmp/tau-test" })
+    const missing = await plane.execute({ sessionId: "s", toolCallId: "a2", name: "artifact_read", args: { ref: "art-nope" }, cwd: "/tmp/tau-test" })
     expect(missing.ok).toBe(false)
     if (!missing.ok) expect(missing.error.code).toBe("not_found")
 
-    const emptyRef = await plane.execute({ sessionId: "s", toolCallId: "a3", name: "artifact:read", args: {}, cwd: "/tmp/tau-test" })
+    const emptyRef = await plane.execute({ sessionId: "s", toolCallId: "a3", name: "artifact_read", args: {}, cwd: "/tmp/tau-test" })
     expect(emptyRef.ok).toBe(false)
     if (!emptyRef.ok) expect(emptyRef.error.code).toBe("rejected")
   })
@@ -605,24 +605,24 @@ describe("action 平面:workspace 模型统一(M10.5:gitignore + 越界归属 + 
     const store = createMemoryStore()
     const plane = createActionPlane(store, { workspaceRoots: [root], autoApprove: true })
 
-    const created = await plane.execute({ sessionId: "s", toolCallId: "w4", name: "worktree:create", args: { name: "run-1" }, cwd: root })
+    const created = await plane.execute({ sessionId: "s", toolCallId: "w4", name: "worktree_create", args: { name: "run-1" }, cwd: root })
     expect(created.ok).toBe(true)
     if (created.ok) expect(created.result.stdout).toBe(`${root}/.tau-worktrees/run-1`)
 
-    const listed = await plane.execute({ sessionId: "s", toolCallId: "w5", name: "worktree:list", args: {}, cwd: root })
+    const listed = await plane.execute({ sessionId: "s", toolCallId: "w5", name: "worktree_list", args: {}, cwd: root })
     expect(listed.ok).toBe(true)
     if (listed.ok) expect(listed.result.stdout).toContain("run-1")
 
-    const bad = await plane.execute({ sessionId: "s", toolCallId: "w6", name: "worktree:create", args: { name: "../escape" }, cwd: root })
+    const bad = await plane.execute({ sessionId: "s", toolCallId: "w6", name: "worktree_create", args: { name: "../escape" }, cwd: root })
     expect(bad.ok).toBe(false)
     if (!bad.ok) expect(bad.error.code).toBe("rejected")
 
     const find = await plane.execute({ sessionId: "s", toolCallId: "w7", name: "find", args: { name: "run-1" }, cwd: root })
     if (find.ok) expect(find.result.stdout).toContain("0 命中")
 
-    const rm = await plane.execute({ sessionId: "s", toolCallId: "w8", name: "worktree:rm", args: { name: "run-1" }, cwd: root })
+    const rm = await plane.execute({ sessionId: "s", toolCallId: "w8", name: "worktree_rm", args: { name: "run-1" }, cwd: root })
     expect(rm.ok).toBe(true)
-    const listed2 = await plane.execute({ sessionId: "s", toolCallId: "w9", name: "worktree:list", args: {}, cwd: root })
+    const listed2 = await plane.execute({ sessionId: "s", toolCallId: "w9", name: "worktree_list", args: {}, cwd: root })
     if (listed2.ok) expect(listed2.result.stdout).toContain("0 条目")
   })
 })

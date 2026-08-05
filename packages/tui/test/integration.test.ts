@@ -433,4 +433,35 @@ describe("集成:Event 流驱动 transcript + tool-panel", () => {
     expect(tc.render(40)).toBe(tc40)
     expect(tp.render(40)).toBe(tp40)
   })
+
+  it("流式:text_delta 累计为进行中行,终态 transcript 清空替换", () => {
+    const tc = new TranscriptView()
+    const first = tc.render(80)
+    expect(first).toEqual([])
+
+    // 思考增量(thinking 通道)
+    tc.consume(ev({ kind: "text_delta", text: "先看目录", thinking: true }))
+    const t1 = tc.render(80)
+    expect(tc.isStreaming()).toBe(true)
+    expect(stripAnsi(t1[t1.length - 1]!)).toContain("(thinking) 先看目录")
+
+    // 正文增量(text 通道)
+    tc.consume(ev({ kind: "text_delta", text: "读了", thinking: false }))
+    tc.consume(ev({ kind: "text_delta", text: "三个文件", thinking: false }))
+    const t2 = tc.render(80)
+    expect(stripAnsi(t2[t2.length - 1]!)).toContain("读了三个文件")
+
+    // spinner 帧推进:同内容不同引用(有流式行时不污染缓存)
+    tc.tick()
+    const t3 = tc.render(80)
+    expect(t3).not.toBe(t2)
+    expect(stripAnsi(t3[t3.length - 1]!)).toContain("读了三个文件")
+
+    // 终态 transcript 到达 → 进行中行清空,落定稿行
+    tc.consume(transcript(assistantMsg("读了三个文件")))
+    expect(tc.isStreaming()).toBe(false)
+    const final = tc.render(80)
+    expect(stripAnsi(final.join("\n"))).toContain("读了三个文件")
+    expect(final.some((l) => l.includes("⠋") || l.includes("⠙"))).toBe(false)
+  })
 })

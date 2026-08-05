@@ -7,7 +7,7 @@ import type { ContextProjection, Message, Model, ModelCapabilities, SystemBlock,
 import { resolveAuth } from "./auth.ts"
 import { promptCache, recordCacheHit, type CacheStats } from "./cache.ts"
 import { chatOptionsFor, routeProvider } from "./route.ts"
-import { collectStream, errorCodeOf, normalizeStream, type AiStreamPart, type LlmCollectResult, type LlmEvent, type LlmUsage } from "./stream.ts"
+import { collectStream, errorCodeOf, errorMessage, normalizeStream, type AiStreamPart, type LlmCollectResult, type LlmEvent, type LlmUsage } from "./stream.ts"
 
 export type LlmRequest = {
   /** 模型 id(缺省用投影 self.model.id)。 */
@@ -300,10 +300,11 @@ export function toAiMessages(history: readonly Message[]): Array<Record<string, 
         if (block.url) parts.push({ type: "image", image: block.url })
         else if (block.base64) parts.push({ type: "image", image: `data:image/png;base64,${block.base64}` })
       } else if (block.type === "thinking") {
-        // 思路链文本渲染:模型接住自己的推理(部分供应商无独立 reasoning 通道,降级为文本保持连续)
-        parts.push({ type: "text", text: `<thinking>\n${block.text}\n</thinking>` })
+        // 思路链回传 reasoning part(wire = reasoning_content):推理模型要求上一轮的 reasoning_content 原样带回,
+        // 降级为文本会让 DeepSeek 系网关报"thinking mode 必须回传"(会话历史里只有产生过 thinking 的模型才有此块,天然按模型对齐)
+        parts.push({ type: "reasoning", text: block.text })
       } else if (block.type === "artifact") {
-        // 大载荷引用:正文存 store,模型侧只见引用元数据,按需经 artifact:read 取回
+        // 大载荷引用:正文存 store,模型侧只见引用元数据,按需经 artifact_read 取回
         const meta = `[artifact:ref ${block.ref}${block.size !== undefined ? ` size=${block.size}` : ""}${block.hash !== undefined ? ` hash=${block.hash}` : ""}]`
         parts.push({ type: "text", text: meta })
       }
@@ -343,8 +344,8 @@ export function toToolSet(tools: readonly SystemCall[]): ToolSet {
 
 /** 同步构造错误归一(streamText 构造期抛错不发流)。与流中 error 共用错误码映射。 */
 function normalizeError(error: unknown): Extract<LlmEvent, { type: "error" }> {
-  const anyError = error as { name?: string; message?: string }
+  const anyError = error as { name?: string; message?: unknown }
   if (anyError?.name === "AbortError") return { type: "error", code: "cancelled", message: "已取消", retryable: false }
   const { code, retryable } = errorCodeOf(error)
-  return { type: "error", code, message: anyError?.message ?? String(error), retryable }
+  return { type: "error", code, message: errorMessage(error), retryable }
 }
