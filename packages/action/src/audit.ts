@@ -10,6 +10,8 @@ export type AuditRecord = {
   outcome: "ok" | "error" | "denied" | "pending" | "approved" | "rejected"
   durationMs: number
   approvedBy?: string
+  /** 所属 turn(orchestrate 在 turn 尾部提交;recovery 悬置判定以它为输入)。 */
+  turnId?: string | undefined
 }
 
 export function recordAudit(store: Store, sessionId: string, record: AuditRecord): void {
@@ -20,6 +22,7 @@ export function recordAudit(store: Store, sessionId: string, record: AuditRecord
     actor: record.approvedBy ?? "model",
     action: `${record.toolName}:${record.outcome}`,
     detail: record.argsSummary,
+    ...(record.turnId !== undefined ? { turnId: record.turnId } : {}),
   }
   store.audit.append(entry)
 }

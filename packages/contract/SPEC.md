@@ -5,7 +5,7 @@
 
 ## 功能(公开 API 面)
 - `Model` / `ProviderMeta` 元数据 schema(api/provider/id/**capabilities**/成本/上下文窗/**fallback 降级链声明**(同供应商优先、逐级下探,llm 据此熔断降级,非启发式))
-- 工具分级:tools[] 带 `tier`(T0 常驻 / T1 按需经 `tool:catalog` 查询后注入本 turn)——**双语义声明**:执行侧(action)以 tier 决定并发策略(T0 互斥串行 / T1 并行);投影注入侧"每轮工具描述 token 只花在会用到的"由 session 按 Config tier 规则裁剪(**规划中,当前投影全量注入**)
+- 工具分级:tools[] 带 `tier`(T0 常驻 / T1 按需经 `tool:catalog` 查询后注入本 turn)——**双语义声明**:执行侧(action)以 tier 决定并发策略(T0 互斥串行 / T1 并行);投影注入侧"每轮工具描述 token 只花在会用到的"由 session 按 Config tier 规则裁剪(**已落地**:提供 `toolTierRules` 时投影 = T0 + tool:catalog(发现入口恒在)+ 本 turn 经 `requestTools` 请求过的 T1;缺省全量注入,兼容旧行为)
 - 工具 schema 带 **`maxOutputTokens`**(调用前可知输出上限,与截断语义对齐)
 - `ModelCapabilities` — 能力面:`supportsTools / supportsThinking / supportsParallelCalls / supportsVision / supportsStreaming`;投影裁剪依据(能力缺则 tools/system 块裁剪)
 - `ContextProjection`(投影 schema):`version(epoch) + wake + system[] + history[] + tools[] + self + resources`
@@ -23,7 +23,7 @@
 - 文件类结果带 **`fileMeta { mtime, size, hash? }`**:模型判断"我读的文件是否已被改过"(陈旧 → 重读),也是幂等判定依据
 - **幂等语义声明**:write 原子提交(临时文件 + rename,失败不留半写文件);edit 基于"当前文件内容匹配"判定,不假设上次 apply 生效——crash 恢复后重复操作可自证结果
 - `ToolResult` 分页:**`truncated + totalPages`**,配套 `result:page` 续读协议(截断段按页可取,不整段重灌)
-- system[] 块带 `kind + priority`:**注入防护条款优先级最高**,其余按 priority 降序,冲突以后置为准
+- system[] 块带 `kind + priority`(kind 枚举含 **memory**——记忆索引块,enhance 两级装载的第二级入口):**注入防护条款优先级最高**,其余按 priority 降序,冲突以后置为准
 - `Command` 封闭联合(prompt/steer/approve/**deny**/answer/abort/select/observe),**统一携带 `sender{clientId, kind}`**;answer 携带 `questionId`;approve 经 `toolCallId` 字段携带 permission 事件 `requestId`(定位挂起权限请求),deny 带 `requestId`;**deny 与 ApprovalState 全态对齐**(active/approved/denied/expired/revoked 均可达,用户"明确拒绝"有命令表达,deny 也带 sender 审计);observe = 只读 attach(订阅观察,多窗口/远程)
 - `Event` 封闭联合(**13 变体**:transcript/tool/permission/compression/lifecycle/**input_accepted**/**budget_exceeded**/**loop_detected**/**retry**/**model_switched**/**interrupted**/**recovery**/**goal**),事件带 `id`(因果/幂等/重放);permission 事件带 `requestId` + 参数摘要 `summary`(不含原始参数),询问时发 `requested`、决议后发 `granted/denied/timeout`(产出与双轨语义见 action SPEC);**id 生成规则归属:权威写入侧(session)生成,格式 = 进程内单调序列 + 进程前缀;跨源/跨进程排序按 (epoch, id) 字典序**,重放与 multi-run 下因果序可判定
 - `Goal`(目标文本/状态/进度/判定策略)— 经 `session.setGoal` 进投影
@@ -55,7 +55,7 @@
 | `src/event.ts` | Event 封闭联合(id/redact/输入回执/告警类) |
 | `src/goal.ts` | Goal schema + 判定策略 |
 | `src/session.ts` | SessionSnapshot + pendingSyscalls + epoch |
-| `src/config.ts` | Config schema(纯 schema,零装载/合并逻辑)——**(规划)** 未实现;当前 config 是 app 侧裸 kv(`tau config`) |
+| `src/config.ts` | Config schema(纯 schema + 装载配套,零业务决策):模型/预算/**toolTierRules**/capability 缺省/compaction 策略/thinking 上限;`coerceConfigValue`/`parseMergedConfig`/`formatConfigError` 为装载合并配套(强转 kv 原始串 → 校验 → 缺省填充 → 可操作报错);app 只做装载/合并/路径,非法配置在本 schema 校验期暴露 |
 | `src/invariant.ts` | 双视角不变量 + 预算检查器 + 重放一致性 |
 | `index.ts` | 汇总导出 |
 

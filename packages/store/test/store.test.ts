@@ -143,6 +143,16 @@ describe("store: audit.query 排序对齐(timestamp DESC,最新在前)", () => {
   })
 })
 
+describe("store: audit turnId 往返(双驱动,recovery 悬置判定输入)", () => {
+  forDrivers((store) => {
+    store.audit.append({ id: "a1", sessionId: "s1", timestamp: "2026-01-01T00:00:00Z", actor: "model", action: "read:ok", detail: "{}", turnId: "t5" })
+    store.audit.append({ id: "a2", sessionId: "s1", timestamp: "2026-02-01T00:00:00Z", actor: "model", action: "write:ok", detail: "{}" })
+    const rows = store.audit.query({ sessionId: "s1" })
+    expect(rows.find((a) => a.id === "a1")?.turnId).toBe("t5")
+    expect(rows.find((a) => a.id === "a2")?.turnId).toBeUndefined()
+  })
+})
+
 describe("store: sqlite 慢查询日志按阈值输出", () => {
   it("超阈值的语句触发 logger,不超阈值不触发", () => {
     if (!isBun) return
@@ -244,5 +254,52 @@ describe("store: audit 归档(保留策略)", () => {
     expect(remaining.map((a) => a.id)).not.toContain("a1")
 
     store.close?.()
+  })
+})
+
+describe("store: artifacts 大载荷表(双驱动对齐)", () => {
+  forDrivers((store) => {
+    store.artifacts.put({ ref: "art-1", sessionId: "s1", size: 5, hash: "h1", body: "hello", createdAt: "t1" })
+    store.artifacts.put({ ref: "art-2", sessionId: "s1", mime: "text/plain", size: 3, hash: "h2", body: "big", createdAt: "t2" })
+    store.artifacts.put({ ref: "art-3", sessionId: "s2", size: 1, hash: "h3", body: "x", createdAt: "t3" })
+
+    const got = store.artifacts.get("art-1")
+    expect(got).not.toBeNull()
+    expect(got?.body).toBe("hello")
+    expect(got?.hash).toBe("h1")
+    expect(got?.mime).toBeUndefined()
+    expect(store.artifacts.get("art-2")?.mime).toBe("text/plain")
+
+    // 覆盖写(同 ref 更新)
+    store.artifacts.put({ ref: "art-1", sessionId: "s1", size: 11, hash: "h1b", body: "hello world", createdAt: "t4" })
+    expect(store.artifacts.get("art-1")?.body).toBe("hello world")
+
+    // 会话内枚举不含正文(引用级),ref 升序
+    const metas = store.artifacts.list("s1")
+    expect(metas.map((m) => m.ref)).toEqual(["art-1", "art-2"])
+    expect(metas[0]?.size).toBe(11)
+    expect(metas[0]?.mime).toBeUndefined()
+    expect(metas[1]?.mime).toBe("text/plain")
+
+    // delete
+    store.artifacts.delete("art-2")
+    expect(store.artifacts.get("art-2")).toBeNull()
+  })
+})
+
+describe("store: artifacts sqlite 持久化(文件)", () => {
+  it("写库后重开可读回", () => {
+    if (!isBun) return
+    const tmp = `/tmp/tau-artifacts-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`
+    const store = createStore("sqlite", tmp)
+    store.artifacts.put({ ref: "art-p", sessionId: "s1", size: 4, hash: "h", body: "persist", createdAt: "t" })
+    store.close?.()
+
+    const reopened = createStore("sqlite", tmp)
+    expect(reopened.artifacts.get("art-p")?.body).toBe("persist")
+    expect(reopened.artifacts.list("s1").map((m) => m.ref)).toEqual(["art-p"])
+    reopened.close?.()
+    // 清理临时库
+    try { Bun.file(tmp).delete(); Bun.file(`${tmp}-wal`).delete(); Bun.file(`${tmp}-shm`).delete() } catch { /* ignore */ }
   })
 })

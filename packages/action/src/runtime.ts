@@ -4,7 +4,7 @@
 
 import type { Store } from "@tau/store"
 import { isDangerousCommand, toolError } from "@tau/contract"
-import type { Event, ToolError, ToolResult } from "@tau/contract"
+import type { Event, ToolError, ToolEvent, ToolResult } from "@tau/contract"
 import { ToolRegistry } from "./registry.ts"
 import { CapabilityGate } from "./capability.ts"
 import { recordAudit } from "./audit.ts"
@@ -56,6 +56,10 @@ export type ExecuteRequest = {
   name: string
   args: Record<string, unknown>
   cwd?: string
+  /** 所属 turn(orchestrate 生成;落审计,recovery 悬置判定输入)。 */
+  turnId?: string
+  /** 中断信号(steer 立即断流/取消):中止挂起询问、终止在飞工具、拦截未执行调用。 */
+  signal?: AbortSignal
   /** ask_user 挂起时通知(登记 pendingSyscalls 的落点)。 */
   onPending?: (ask: PendingAsk) => void
 }
@@ -108,7 +112,7 @@ export class ActionPlane {
   private readonly executors = new Map<string, (req: ExecuteRequest) => Promise<ToolResult>>()
   private readonly hooks = createHookRegistry()
   private writeQueue = Promise.resolve()
-  private readonly pendingRequests = new Map<string, { sessionId: string; requestId: string; toolCallId: string; toolName: string; summary: string; started: number; timer: ReturnType<typeof setTimeout>; resolve: (approved: boolean) => void }>()
+  private readonly pendingRequests = new Map<string, { sessionId: string; requestId: string; toolCallId: string; toolName: string; summary: string; started: number; turnId?: string | undefined; timer: ReturnType<typeof setTimeout>; resolve: (approved: boolean) => void }>()
   private readonly pendingQuestions = new Map<string, { questionId: string; toolName: string; summary: string; timer: ReturnType<typeof setTimeout>; resolve: (value: unknown) => void }>()
 
   constructor(store: Store, opts: ActionPlaneOptions = {}) {
@@ -157,7 +161,7 @@ export class ActionPlane {
     clearTimeout(pending.timer)
     this.pendingRequests.delete(requestId)
     this.emitTool({ kind: "permission", requestId, toolName: pending.toolName, summary: pending.summary, state: "granted" })
-    recordAudit(this.store, pending.sessionId, { toolName: pending.toolName, argsSummary: pending.summary, outcome: "approved", durationMs: Date.now() - pending.started })
+    recordAudit(this.store, pending.sessionId, { toolName: pending.toolName, argsSummary: pending.summary, outcome: "approved", durationMs: Date.now() - pending.started, turnId: pending.turnId })
     pending.resolve(true)
     return true
   }
@@ -186,7 +190,7 @@ export class ActionPlane {
     clearTimeout(pending.timer)
     this.pendingRequests.delete(requestId)
     this.emitTool({ kind: "permission", requestId, toolName: pending.toolName, summary: pending.summary, state: "denied" })
-    recordAudit(this.store, pending.sessionId, { toolName: pending.toolName, argsSummary: pending.summary, outcome: "rejected", durationMs: Date.now() - pending.started })
+    recordAudit(this.store, pending.sessionId, { toolName: pending.toolName, argsSummary: pending.summary, outcome: "rejected", durationMs: Date.now() - pending.started, turnId: pending.turnId })
     void reason
     pending.resolve(false)
     return true
@@ -228,14 +232,14 @@ export class ActionPlane {
     if (this.opts.onPermission !== undefined) {
       const approved = await this.opts.onPermission({ toolCallId: req.toolCallId, toolName: req.name, summary })
       emit({ kind: "permission", requestId, toolName: req.name, summary, state: approved ? "granted" : "denied" })
-      recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: summary, outcome: approved ? "approved" : "rejected", durationMs: Date.now() - started })
+      recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: summary, outcome: approved ? "approved" : "rejected", durationMs: Date.now() - started, turnId: req.turnId })
       return approved
     }
 
     // 危险命令强制询问:autoApprove 不豁免(命中模式表必须真实决策,静默放行 = 违宪 16)
     if (this.opts.autoApprove === true && !forcedAsk) {
       emit({ kind: "permission", requestId, toolName: req.name, summary, state: "granted" })
-      recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: summary, outcome: "approved", durationMs: Date.now() - started })
+      recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: summary, outcome: "approved", durationMs: Date.now() - started, turnId: req.turnId })
       return true
     }
 
@@ -244,24 +248,38 @@ export class ActionPlane {
       const timer = setTimeout(() => {
         this.pendingRequests.delete(requestId)
         emit({ kind: "permission", requestId, toolName: req.name, summary, state: "timeout" })
-        recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: summary, outcome: "rejected", durationMs: Date.now() - started })
+        recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: summary, outcome: "rejected", durationMs: Date.now() - started, turnId: req.turnId })
         resolve(false)
       }, this.opts.permissionTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS)
-      this.pendingRequests.set(requestId, { sessionId: req.sessionId, requestId, toolCallId: req.toolCallId, toolName: req.name, summary, started, timer, resolve })
+      const onAbort = () => {
+        // 中断信号(steer 立即断流):清理挂起项;决议结果由调用侧 withAbort 竞速以 cancelled 收尾
+        clearTimeout(timer)
+        this.pendingRequests.delete(requestId)
+        resolve(false)
+      }
+      req.signal?.addEventListener("abort", onAbort, { once: true })
+      this.pendingRequests.set(requestId, { sessionId: req.sessionId, requestId, toolCallId: req.toolCallId, toolName: req.name, summary, started, turnId: req.turnId, timer, resolve })
     })
   }
 
-  async execute(req: ExecuteRequest, opts: { timeoutMs?: number } = {}): Promise<ExecuteOutcome> {
+  /**
+   * 流式执行面:每调用产出 tool 生命周期事件(started → completed/failed,结果/错误在终态事件)。
+   * 权限询问/挂起/截断等旁路事件仍走 onEvent 双轨(不进本流);execute() 是它的结果收口。
+   */
+  async *executeStream(req: ExecuteRequest, opts: { timeoutMs?: number; bypassQueue?: boolean } = {}): AsyncGenerator<ToolEvent, void, void> {
     const started = Date.now()
-    const emit = (event: EventInput) =>
-      this.opts.onEvent?.({ id: crypto.randomUUID(), timestamp: new Date().toISOString(), redact: [], ...event } as Event)
+    const emit = (event: EventInput): Event => {
+      const full = { id: crypto.randomUUID(), timestamp: new Date().toISOString(), redact: [], ...event } as Event
+      this.opts.onEvent?.(full)
+      return full
+    }
 
     const syscall = this.registry.get(req.name)
     if (syscall === null) {
       const error = toolError("not_found", `未知工具:${req.name};可用:${this.registry.all().map((t) => t.name).join(", ")}`)
-      emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "failed", error })
-      recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: brief(argsOf(req)), outcome: "error", durationMs: Date.now() - started })
-      return { ok: false, error }
+      yield emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "failed", error }) as ToolEvent
+      recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: brief(argsOf(req)), outcome: "error", durationMs: Date.now() - started, turnId: req.turnId })
+      return
     }
 
     // 危险命令强制询问:命中模式表无条件升级为 ask(含 autoApprove 场景,静默放行 = 违宪 16)
@@ -269,25 +287,35 @@ export class ActionPlane {
     const decision = forcedAsk ? ({ rule: "ask" } as const) : this.gate.decide(req.name, syscall.dangerous)
     if (decision.rule === "deny") {
       const error = toolError("permission_denied", `${req.name}:${decision.reason}`)
-      emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "failed", args: req.args, error })
-      recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: brief(argsOf(req)), outcome: "denied", durationMs: Date.now() - started })
-      return { ok: false, error }
+      yield emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "failed", args: req.args, error }) as ToolEvent
+      recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: brief(argsOf(req)), outcome: "denied", durationMs: Date.now() - started, turnId: req.turnId })
+      return
     }
     if (decision.rule === "ask") {
-      const approved = await this.resolveApproval(req, syscall, started, emit, forcedAsk)
+      let approved = false
+      try {
+        const approval = this.resolveApproval(req, syscall, started, emit, forcedAsk)
+        approved = req.signal === undefined ? await approval : await withAbort(approval, req.signal)
+      } catch (err) {
+        // 中断(steer 立即断流):挂起询问未决即中止,以 aborted 错误收尾(非 rejected)
+        const error = normalizeError(err)
+        yield emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "failed", args: req.args, error }) as ToolEvent
+        recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: brief(argsOf(req)), outcome: "error", durationMs: Date.now() - started, turnId: req.turnId })
+        return
+      }
       if (!approved) {
         // 决议(拒绝/超时)落点:permission 事件已发,补发 tool failed 让调度层记录 reject 结果
         const error = toolError("rejected", `${req.name} 权限被拒绝`)
-        emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "failed", error })
-        return { ok: false, error }
+        yield emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "failed", error }) as ToolEvent
+        return
       }
     }
 
     const executor = this.executors.get(req.name)
     if (executor === undefined) {
       const error = toolError("internal", `工具 ${req.name} 已注册元数据但无执行器`)
-      emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "failed", error })
-      return { ok: false, error }
+      yield emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "failed", error }) as ToolEvent
+      return
     }
 
     // 执行 before hooks
@@ -302,15 +330,16 @@ export class ActionPlane {
       await this.hooks.execute(beforeCtx)
     } catch (hookErr) {
       const error = toolError("rejected", `hook 阻止执行: ${hookErr instanceof Error ? hookErr.message : String(hookErr)}`)
-      emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "failed", args: req.args, error })
-      recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: brief(argsOf(req)), outcome: "rejected", durationMs: Date.now() - started })
-      return { ok: false, error }
+      yield emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "failed", args: req.args, error }) as ToolEvent
+      recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: brief(argsOf(req)), outcome: "rejected", durationMs: Date.now() - started, turnId: req.turnId })
+      return
     }
 
-    emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "started", args: req.args })
+    yield emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "started", args: req.args }) as ToolEvent
     try {
-      const exec = syscall.tier === "T0" ? this.enqueue(() => executor(req)) : executor(req)
-      const result = opts.timeoutMs === undefined ? await exec : await withTimeoutMs(exec, opts.timeoutMs)
+      const exec = opts.bypassQueue === true || syscall.tier !== "T0" ? executor(req) : this.enqueue(() => executor(req))
+      const raced = req.signal === undefined ? exec : withAbort(exec, req.signal)
+      const result = opts.timeoutMs === undefined ? await raced : await withTimeoutMs(raced, opts.timeoutMs)
       const marked = markSecrets(result)
 
       // 执行 after hooks
@@ -324,9 +353,9 @@ export class ActionPlane {
       }
       await this.hooks.execute(afterCtx)
 
-      emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "completed", result: marked.result })
-      recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: brief(argsOf(req)), outcome: "ok", durationMs: Date.now() - started })
-      return { ok: true, result: marked.result }
+      yield emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "completed", result: marked.result }) as ToolEvent
+      recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: brief(argsOf(req)), outcome: "ok", durationMs: Date.now() - started, turnId: req.turnId })
+      return
     } catch (err) {
       // 执行 error hooks
       const errorCtx: HookContext = {
@@ -340,10 +369,23 @@ export class ActionPlane {
       await this.hooks.execute(errorCtx)
 
       const error = normalizeError(err)
-      emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "failed", error })
-      recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: brief(argsOf(req)), outcome: "error", durationMs: Date.now() - started })
-      return { ok: false, error }
+      yield emit({ kind: "tool", toolCallId: req.toolCallId, name: req.name, state: "failed", error }) as ToolEvent
+      recordAudit(this.store, req.sessionId, { toolName: req.name, argsSummary: brief(argsOf(req)), outcome: "error", durationMs: Date.now() - started, turnId: req.turnId })
+      return
     }
+  }
+
+  /** 结果收口:executeStream 的 Promise 形态(终态事件 → ExecuteOutcome;消费方只要最终结果时用它)。 */
+  async execute(req: ExecuteRequest, opts: { timeoutMs?: number; bypassQueue?: boolean } = {}): Promise<ExecuteOutcome> {
+    let outcome: ExecuteOutcome = { ok: false, error: toolError("internal", "无工具事件产出") }
+    for await (const event of this.executeStream(req, opts)) {
+      if (event.state === "completed" && event.result !== undefined) {
+        outcome = { ok: true, result: event.result }
+      } else if (event.state === "failed" && event.error !== undefined) {
+        outcome = { ok: false, error: event.error }
+      }
+    }
+    return outcome
   }
 
   private emitTool(event: EventInput): void {
@@ -379,6 +421,28 @@ async function withTimeoutMs<T>(exec: Promise<T>, ms: number): Promise<T> {
   }
 }
 
+/** 中断竞速:signal 触发 → 以 aborted 错误中止(在飞执行体自身继续,结果被丢弃;bash 由工具侧监听 signal 杀进程树)。 */
+function withAbort<T>(exec: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new ToolErrorException(toolError("cancelled", "执行已中断")))
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort)
+      reject(new ToolErrorException(toolError("cancelled", "执行已中断")))
+    }
+    signal.addEventListener("abort", onAbort, { once: true })
+    exec.then(
+      (v) => {
+        signal.removeEventListener("abort", onAbort)
+        resolve(v)
+      },
+      (e) => {
+        signal.removeEventListener("abort", onAbort)
+        reject(e)
+      },
+    )
+  })
+}
+
 export class ToolErrorException extends Error {
   readonly error: ToolError
 
@@ -393,6 +457,7 @@ function normalizeError(err: unknown): ToolError {
   if (err instanceof Error) {
     const msg = err.message
     if (/timeout/.test(msg)) return toolError("timeout", msg)
+    if (/中断|aborted/.test(msg)) return toolError("cancelled", msg)
     if (/权限|denied|越界/.test(msg)) return toolError("permission_denied", msg)
     if (/不存在|not found|ENOENT/.test(msg)) return toolError("not_found", msg)
     return toolError("internal", msg)

@@ -85,7 +85,7 @@ export const SystemCallSchema = z.object({
   name: z.string(),
   description: z.string(),
   parameters: z.record(z.string(), z.unknown()),
-  tier: z.enum(["T0", "T1"]).default("T1") satisfies z.ZodType<ToolTier>,
+  tier: z.enum(["T0", "T1", "T2"]).default("T1") satisfies z.ZodType<ToolTier>,
   maxOutputTokens: z.number().int().positive().optional(),
   dangerous: z.boolean().default(false),
   defaultRule: CapabilityRuleSchema.optional(),

@@ -19,6 +19,8 @@ export type AuditEntry = {
   actor: string
   action: string
   detail: string
+  /** 所属 turn(提交点边界由 orchestrate 在 turn 尾部 commitTurn 写入);recovery 悬置判定以此为输入。 */
+  turnId?: string
 }
 
 export type AuditQuery = {
@@ -94,6 +96,33 @@ export interface KvTable {
   list(prefix?: string): readonly KvEntry[]
 }
 
+/** artifact 记录:正文存 store,历史仅引用(大载荷不烧上下文)。 */
+export type ArtifactRecord = {
+  ref: string
+  sessionId: string
+  mime?: string
+  size: number
+  hash: string
+  body: string
+  createdAt: string
+}
+
+/** artifact 目录条目(引用枚举,不含正文)。 */
+export type ArtifactMeta = {
+  ref: string
+  mime?: string
+  size: number
+  hash: string
+}
+
+export interface ArtifactTable {
+  put(record: ArtifactRecord): void
+  get(ref: string): ArtifactRecord | null
+  delete(ref: string): void
+  /** 会话内引用枚举(ref 升序)。 */
+  list(sessionId: string): readonly ArtifactMeta[]
+}
+
 export interface Store {
   readonly driver: "sqlite" | "memory"
   sessions: SessionTable
@@ -101,6 +130,7 @@ export interface Store {
   events: EventTable
   audit: AuditTable
   kv: KvTable
+  artifacts: ArtifactTable
   tx<T>(work: () => T): T
   migrate(): void
   /** 关闭底层连接(memory 无操作;sqlite 释放文件句柄)。 */

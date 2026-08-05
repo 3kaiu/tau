@@ -14,7 +14,7 @@ import {
   type Model,
 } from "@tau/contract"
 import { createStore, type Store } from "@tau/store"
-import { createSession, type SessionOptions } from "@tau/session"
+import { createSession, runCompact, type SessionOptions } from "@tau/session"
 
 const MODEL: Model = ModelSchema.parse({
   id: "gpt-5-mini",
@@ -250,6 +250,46 @@ describe("压缩是交换不是丢弃", () => {
     expect(found.total).toBe(1)
     expect(found.results[0]?.message.content.some((c) => c.type === "text" && c.text.includes("vault"))).toBe(true)
   })
+
+  it("runCompact 独立编排:无候选不交换(null),有候选摘要进/全文出", () => {
+    const store = createStore("memory")
+    const events: Event[] = []
+    const summaryIds: string[] = []
+    const deps = {
+      store,
+      sessionId: "s1",
+      messages: [],
+      keepRecent: 6,
+      reason: "token-budget",
+      summaryText: "全部摘要",
+      clockNow: () => "t",
+      emit: (e: Event) => events.push(e),
+      registerSummary: (id: string) => summaryIds.push(id),
+      touch: () => {},
+    }
+    const none = runCompact(deps)
+    expect(none).toBeNull()
+    expect(events).toEqual([])
+
+    for (let i = 0; i < 10; i++) {
+      store.messages.append("s1", MessageSchema.parse({
+        id: `m${i}`,
+        role: "user",
+        content: [{ type: "text", text: `消息${i}` }],
+        retention: i % 2 === 0 ? "low" : "normal",
+        createdAt: `t${i}`,
+      }))
+    }
+    const summary = runCompact({ ...deps, messages: store.messages.list("s1").messages })
+    expect(summary).not.toBeNull()
+    expect(summary?.content[0]?.type).toBe("text")
+    expect(events.some((e) => e.kind === "compression")).toBe(true)
+    expect(summaryIds).toEqual([summary?.id])
+    const live = store.messages.list("s1").messages
+    expect(live.some((m) => m.id === "m0")).toBe(false)
+    expect(live.some((m) => m.id === summary?.id)).toBe(true)
+    expect(store.messages.archiveSearch("s1", "消息0", 0, 10).total).toBeGreaterThan(0)
+  })
 })
 
 describe("diff 与重放一致性", () => {
@@ -307,18 +347,30 @@ describe("diff 与重放一致性", () => {
 })
 
 describe("崩溃恢复", () => {
-  it("重启后从 store 重放:recovery 事件 + 投影告知", () => {
+  it("重启后从 store 重放:recovery 事件 + 投影告知(未提交 turn 的 syscall 清单)", () => {
     const store = createStore("memory")
     const first = createSession(makeOptions(store))
     first.admit({ text: "改代码", source: "cli", wake: "prompt" })
     first.beginTurn()
     first.recordUsage({ promptTokens: 10, completionTokens: 10, totalTokens: 20 })
+    // 模拟崩溃前已执行但未提交的 syscall(审计带 turnId,无 commitTurn)
+    store.audit.append({
+      id: "aud-1",
+      sessionId: "s1",
+      timestamp: new Date().toISOString(),
+      actor: "model",
+      action: "write:ok",
+      detail: "{\"name\":\"write\",\"args\":{\"path\":\"a.txt\"}}",
+      turnId: "t7",
+    })
     const snapshotBefore = first.snapshot()
 
     // 模拟崩溃:不做 close,直接基于同一 store 重建
     const second = createSession(makeOptions(store))
     const events = store.events.replay("s1")
-    expect(events.some((e) => e.kind === "recovery")).toBe(true)
+    const recovery = events.find((e) => e.kind === "recovery")
+    expect(recovery).toBeDefined()
+    expect(recovery?.kind === "recovery" && recovery.detail?.includes("write")).toBe(true)
     expect(second.project().system.some((b) => b.content.includes("未提交"))).toBe(true)
     expect(second.snapshot().epoch).toBe(snapshotBefore.epoch)
   })
@@ -331,6 +383,46 @@ describe("崩溃恢复", () => {
     const second = createSession(makeOptions(store))
     expect(store.events.replay("s1").some((e) => e.kind === "recovery")).toBe(false)
     expect(second.snapshot().status).toBe("closed")
+  })
+
+  it("已提交 turn 崩溃不误报(提交点锚定后无悬置)", () => {
+    const store = createStore("memory")
+    const first = createSession(makeOptions(store))
+    first.admit({ text: "改代码", source: "cli", wake: "prompt" })
+    store.audit.append({
+      id: "aud-2",
+      sessionId: "s1",
+      timestamp: new Date().toISOString(),
+      actor: "model",
+      action: "write:ok",
+      detail: "{\"name\":\"write\",\"args\":{\"path\":\"a.txt\"}}",
+      turnId: "t9",
+    })
+    first.commitTurn("t9")
+
+    const second = createSession(makeOptions(store))
+    expect(store.events.replay("s1").some((e) => e.kind === "recovery")).toBe(false)
+    expect(second.project().system.some((b) => b.content.includes("恢复告知"))).toBe(false)
+  })
+
+  it("旧数据(审计无 turnId)退回通用告警", () => {
+    const store = createStore("memory")
+    const first = createSession(makeOptions(store))
+    first.admit({ text: "改代码", source: "cli", wake: "prompt" })
+    store.audit.append({
+      id: "aud-3",
+      sessionId: "s1",
+      timestamp: new Date().toISOString(),
+      actor: "model",
+      action: "bash:ok",
+      detail: "{\"name\":\"bash\",\"args\":{\"command\":\"make\"}}",
+    })
+
+    const second = createSession(makeOptions(store))
+    const recovery = store.events.replay("s1").find((e) => e.kind === "recovery")
+    expect(recovery).toBeDefined()
+    expect(recovery?.kind === "recovery" && recovery.detail?.includes("未提交")).toBe(true)
+    void second
   })
 })
 
@@ -398,5 +490,156 @@ describe("事件可观测", () => {
     expect(seen.map((e) => e.kind)).toContain("input_accepted")
     expect(seen.map((e) => e.kind)).toContain("transcript")
     expect(collect(seen, "input_accepted")).toHaveLength(1)
+  })
+})
+
+describe("artifacts 大载荷外置(M10.3-b)", () => {
+  it("appendMessage:text 块超阈值 → artifact 引用,正文存 store,投影与事件流只含引用", () => {
+    const store = createStore("memory")
+    const session = createSession(makeOptions(store, { artifactThresholdBytes: 100 }))
+    const big = "y".repeat(5_000)
+    session.appendMessage({
+      id: "m-art",
+      role: "assistant",
+      content: [
+        { type: "text", text: "short" },
+        { type: "text", text: big },
+      ],
+      toolCalls: [],
+      toolResults: [],
+      interrupted: false,
+      source: "model",
+      retention: "normal",
+      createdAt: new Date().toISOString(),
+    })
+
+    const history = session.project().history
+    const msg = history.find((m) => m.id === "m-art")
+    expect(msg).toBeDefined()
+    const blocks = msg?.content ?? []
+    expect(blocks[0]?.type).toBe("text")
+    expect(blocks[1]?.type).toBe("artifact")
+    if (blocks[1]?.type === "artifact") {
+      // 引用带 size/hash,正文不烧上下文
+      expect(blocks[1].size).toBe(5_000)
+      expect(blocks[1].hash).toBeDefined()
+      const body = session.readArtifact(blocks[1].ref)
+      expect(body?.body).toBe(big)
+      expect(body?.hash).toBe(blocks[1].hash)
+    }
+    // 投影历史不含大载荷正文
+    const serialized = JSON.stringify(history)
+    expect(serialized).not.toContain(big)
+    // 会话内引用枚举(不含正文)
+    const metas = session.listArtifacts()
+    expect(metas.length).toBe(1)
+    expect(metas[0]?.size).toBe(5_000)
+  })
+
+  it("admit:用户输入超阈值同样外置(先落盘后响应,返回消息带引用)", () => {
+    const store = createStore("memory")
+    const session = createSession(makeOptions(store, { artifactThresholdBytes: 50 }))
+    const big = "x".repeat(200)
+    const admitted = session.admit({ text: big, source: "prompt", wake: "prompt" })
+    expect(admitted.content[0]?.type).toBe("artifact")
+    if (admitted.content[0]?.type === "artifact") {
+      expect(session.readArtifact(admitted.content[0].ref)?.body).toBe(big)
+    }
+  })
+
+  it("小文本块不外置(阈值内保持 inline)", () => {
+    const store = createStore("memory")
+    const session = createSession(makeOptions(store, { artifactThresholdBytes: 100 }))
+    const small = "hello".repeat(10)
+    session.appendMessage({
+      id: "m-inline",
+      role: "user",
+      content: [{ type: "text", text: small }],
+      toolCalls: [],
+      toolResults: [],
+      interrupted: false,
+      source: "prompt",
+      retention: "high",
+      createdAt: new Date().toISOString(),
+    })
+    const msg = session.project().history.find((m) => m.id === "m-inline")
+    expect(msg?.content[0]?.type).toBe("text")
+    expect(session.listArtifacts().length).toBe(0)
+  })
+
+  it("purgeArtifact 删除正文(引用失效,读回 null)", () => {
+    const store = createStore("memory")
+    const session = createSession(makeOptions(store, { artifactThresholdBytes: 10 }))
+    session.appendMessage({
+      id: "m-purge",
+      role: "assistant",
+      content: [{ type: "text", text: "p".repeat(200) }],
+      toolCalls: [],
+      toolResults: [],
+      interrupted: false,
+      source: "model",
+      retention: "normal",
+      createdAt: new Date().toISOString(),
+    })
+    const ref = session.listArtifacts()[0]?.ref
+    expect(ref).toBeDefined()
+    expect(session.readArtifact(ref!)).not.toBeNull()
+    session.purgeArtifact(ref!)
+    expect(session.readArtifact(ref!)).toBeNull()
+  })
+})
+
+describe("tier 规则工具注入裁剪(M10.3-e)", () => {
+  const tools = [
+    { name: "read", description: "r", parameters: {}, tier: "T0" as const, dangerous: false },
+    { name: "grep", description: "g", parameters: {}, tier: "T1" as const, dangerous: false },
+    { name: "find", description: "f", parameters: {}, tier: "T1" as const, dangerous: false },
+    { name: "tool:catalog", description: "c", parameters: {}, tier: "T0" as const, dangerous: false },
+  ]
+
+  function sessionWithRules(rules: { overrides?: Record<string, "T0" | "T1">; defaultTier?: "T0" | "T1" }) {
+    const store = createStore("memory")
+    return createSession(
+      makeOptions(store, {
+        tools,
+        toolTierRules: { defaultTier: rules.defaultTier ?? "T1", overrides: rules.overrides ?? {} },
+      }),
+    )
+  }
+
+  it("提供 tier 规则时:T0 常驻,T1 缺省不进投影,override 可强制提升", () => {
+    const session = sessionWithRules({ overrides: { read: "T0" } })
+    const names = session.project().tools.map((t) => t.name)
+    expect(names).toContain("read")
+    expect(names).toContain("tool:catalog")
+    expect(names).not.toContain("grep")
+    expect(names).not.toContain("find")
+  })
+
+  it("requestTools 按需注入 T1(本 turn 生效);beginTurn 重置", () => {
+    const session = sessionWithRules({})
+    expect(session.project().tools.map((t) => t.name)).not.toContain("grep")
+
+    session.requestTools(["grep"])
+    const after = session.project().tools.map((t) => t.name)
+    expect(after).toContain("grep")
+    expect(after).not.toContain("find")
+
+    session.beginTurn()
+    expect(session.project().tools.map((t) => t.name)).not.toContain("grep")
+  })
+
+  it("requestTools 对 T0 与未知名是 no-op;无 tier 规则时 requestTools 无副作用", () => {
+    const session = sessionWithRules({})
+    session.requestTools(["read", "nonexistent", "tool:catalog"])
+    const names = session.project().tools.map((t) => t.name)
+    expect(names.filter((n) => !["read", "tool:catalog"].includes(n))).toEqual([])
+
+    const store = createStore("memory")
+    const plain = createSession(makeOptions(store, { tools }))
+    plain.requestTools(["grep"])
+    const all = plain.project().tools.map((t) => t.name)
+    expect(all).toContain("grep")
+    expect(all.length).toBe(4)
   })
 })

@@ -39,6 +39,16 @@ describe.skipIf(!isBun)("断点续跑:SQLite 持久化 + 崩溃恢复", () => {
       session.admit({ text: "hello", source: "test", wake: "prompt" })
       session.appendMessage(makeMessage("a1", "assistant", "hi there"))
       session.recordUsage({ promptTokens: 100, completionTokens: 50, totalTokens: 150 })
+      // 模拟崩溃前已执行但未提交的 syscall(审计带 turnId,无 commitTurn)
+      store.audit.append({
+        id: "aud-crash",
+        sessionId,
+        timestamp: new Date().toISOString(),
+        actor: "model",
+        action: "write:ok",
+        detail: "{\"name\":\"write\",\"args\":{\"path\":\"out.txt\"}}",
+        turnId: "t5",
+      })
 
       store.close?.()
     }
@@ -53,10 +63,11 @@ describe.skipIf(!isBun)("断点续跑:SQLite 持久化 + 崩溃恢复", () => {
       expect(history.length).toBeGreaterThanOrEqual(2)
       expect(history.map((m) => m.id)).toContain("a1")
 
-      // recovery 事件发出(模型可见)
+      // recovery 事件发出(模型可见),detail 带未提交 syscall 清单(turnId 判定,非瞎猜)
       const events = store.events.replay(sessionId)
-      const hasRecovery = events.some((e) => e.kind === "recovery")
-      expect(hasRecovery).toBe(true)
+      const recovery = events.find((e) => e.kind === "recovery")
+      expect(recovery).toBeDefined()
+      expect(recovery?.kind === "recovery" && recovery.detail?.includes("write")).toBe(true)
 
       // 投影含 recovery 告警
       const proj = session.project()

@@ -22,11 +22,14 @@ import {
   checkReplay,
   checkToolPairing,
   contractSchemas,
+  coerceConfigValue,
   createEventIdGenerator,
   goal,
   hasRecoveryNotice,
+  isConfigKey,
   isDangerousCommand,
   jsonSchemas,
+  parseMergedConfig,
   recentActivityFrom,
   redactFields,
   toolError,
@@ -408,6 +411,35 @@ describe("audit8 六 schema + 事件 id 生成器", () => {
     expect(cfg.compaction.triggerRatio).toBe(0.8)
     expect(cfg.compaction.keepRecent).toBe(6)
     expect(cfg.thinking.maxBytes).toBe(32 * 1024)
+  })
+
+  it("配置装载:kv 原始串强转 + 合并校验 + 缺省填充", () => {
+    const cfg = parseMergedConfig({
+      maxContextTokens: "16000",
+      toolTierRules: JSON.stringify({ defaultTier: "T1", overrides: { read: "T0" } }),
+      compaction: JSON.stringify({ triggerRatio: 0.5 }),
+      model: "gpt-5",
+    })
+    expect(cfg.maxContextTokens).toBe(16000)
+    expect(cfg.toolTierRules.overrides.read).toBe("T0")
+    expect(cfg.compaction.triggerRatio).toBe(0.5)
+    expect(cfg.compaction.keepRecent).toBe(6)
+    expect(cfg.model).toBe("gpt-5")
+  })
+
+  it("配置装载:非法值拒绝并给出可操作报错", () => {
+    expect(() => parseMergedConfig({ maxContextTokens: "abc" })).toThrow(/配置不合法/)
+    expect(() => parseMergedConfig({ compaction: "{bad json" })).toThrow(/配置不合法/)
+    expect(() => parseMergedConfig({ toolTierRules: JSON.stringify({ defaultTier: "T9" }) })).toThrow(/配置不合法/)
+  })
+
+  it("coerceConfigValue:对象/整型强转,未知键与坏串原样透传", () => {
+    expect(coerceConfigValue("maxContextTokens", "8000")).toBe(8000)
+    expect(coerceConfigValue("turnBudget", '{"perTurnMax":1}')).toEqual({ perTurnMax: 1 })
+    expect(coerceConfigValue("compaction", "{bad")).toBe("{bad")
+    expect(coerceConfigValue("ui.theme", "dark")).toBe("dark")
+    expect(isConfigKey("maxContextTokens")).toBe(true)
+    expect(isConfigKey("ui.theme")).toBe(false)
   })
 
   it("事件 id 生成器:进程前缀 + 单调定宽,字典序 = 因果序", () => {

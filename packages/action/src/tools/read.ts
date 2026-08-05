@@ -7,7 +7,7 @@ import { toolError, toolResult } from "@tau/contract"
 import type { FileMeta, ToolResult } from "@tau/contract"
 import { ToolErrorException, type ExecuteRequest } from "../runtime.ts"
 import { isBinary } from "../runtime.ts"
-import { PathBoundary } from "./common.ts"
+import type { WorkspaceIndex } from "../workspace.ts"
 
 /** 文件元数据(陈旧判定/幂等依据):mtime+size 必带,hash 按需计算。 */
 export function fileMetaOf(path: string, withHash = false): FileMeta {
@@ -19,13 +19,13 @@ export function fileMetaOf(path: string, withHash = false): FileMeta {
   }
 }
 
-export function makeReadTool(boundary: PathBoundary, opts: { binaryToleranceBytes?: number } = {}) {
+export function makeReadTool(index: WorkspaceIndex, opts: { binaryToleranceBytes?: number } = {}) {
   const tolerance = opts.binaryToleranceBytes ?? 8192
   return async (req: ExecuteRequest): Promise<ToolResult> => {
     const pathIn = String(req.args.path ?? "")
     const cwd = req.cwd ?? process.cwd()
     if (pathIn === "") throw new ToolErrorException(toolError("rejected", "read:缺 path 参数"))
-    const path = boundary.resolve(cwd, pathIn)
+    const path = index.resolveWithin(cwd, pathIn)
 
     let raw: Buffer
     try {

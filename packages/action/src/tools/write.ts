@@ -5,15 +5,15 @@ import { dirname } from "node:path"
 import { toolError, toolResult } from "@tau/contract"
 import type { ToolResult } from "@tau/contract"
 import { ToolErrorException, type ExecuteRequest } from "../runtime.ts"
-import { PathBoundary } from "./common.ts"
+import type { WorkspaceIndex } from "../workspace.ts"
 
-export function makeWriteTool(boundary: PathBoundary) {
+export function makeWriteTool(index: WorkspaceIndex) {
   return async (req: ExecuteRequest): Promise<ToolResult> => {
     const pathIn = String(req.args.path ?? "")
     const content = String(req.args.content ?? "")
     const cwd = req.cwd ?? process.cwd()
     if (pathIn === "") throw new ToolErrorException(toolError("rejected", "write:缺 path 参数"))
-    const path = boundary.resolve(cwd, pathIn)
+    const path = index.resolveWithin(cwd, pathIn)
 
     const tmp = `${path}.${process.pid}.${Date.now()}.tmp`
     try {

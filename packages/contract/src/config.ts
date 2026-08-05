@@ -39,3 +39,57 @@ export const ConfigSchema = z.object({
   thinking: ThinkingPolicySchema.default({ maxBytes: 32 * 1024 }),
 })
 export type Config = z.infer<typeof ConfigSchema>
+
+// ---------- 配置装载配套(纯 schema 驱动,零业务决策;惯用型同 invariant.ts) ----------
+
+const OBJECT_KEYS: ReadonlySet<string> = new Set(["turnBudget", "toolTierRules", "capabilityDefaults", "compaction", "thinking"])
+const INT_KEYS: ReadonlySet<string> = new Set(["maxContextTokens"])
+const KNOWN_KEYS: ReadonlySet<string> = new Set([...Object.keys(ConfigSchema.shape), ...OBJECT_KEYS, ...INT_KEYS])
+
+/**
+ * 把 store.kv 的原始字符串值按 Config schema 形状做类型强转:
+ * 对象/数组键 → JSON.parse;整型键 → Number;未知键原样透传(不透明键不拦截)。
+ * 解析失败保留原串,交由 ConfigSchema 校验期报错。
+ */
+export function coerceConfigValue(key: string, raw: unknown): unknown {
+  if (typeof raw !== "string") return raw
+  if (OBJECT_KEYS.has(key)) {
+    try {
+      return JSON.parse(raw)
+    } catch {
+      return raw
+    }
+  }
+  if (INT_KEYS.has(key)) {
+    const n = Number(raw)
+    return Number.isInteger(n) ? n : raw
+  }
+  return raw
+}
+
+/** 该 key 是否属于 Config schema 已知键(装载校验用)。 */
+export function isConfigKey(key: string): boolean {
+  return KNOWN_KEYS.has(key)
+}
+
+/** 合并装载:raw 条目(kv 读出的字符串值)→ 强转 → ConfigSchema 校验 + 缺省填充。非法抛 ConfigError。 */
+export function parseMergedConfig(entries: Record<string, unknown>): Config {
+  const coerced: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(entries)) coerced[key] = coerceConfigValue(key, value)
+  const parsed = ConfigSchema.safeParse(coerced)
+  if (!parsed.success) {
+    throw new ConfigError(formatConfigError(parsed.error, entries))
+  }
+  return parsed.data
+}
+
+/** 非法配置的可操作报错("键 = 值 为什么非法 + 期望类型")。 */
+export function formatConfigError(error: z.ZodError, raw?: Record<string, unknown>): string {
+  const issues = error.issues
+    .slice(0, 5)
+    .map((i) => `  ${i.path.join(".")}: ${i.message}${raw !== undefined && i.path[0] !== undefined ? ` (received ${JSON.stringify(raw[String(i.path[0])])})` : ""}`)
+    .join("\n")
+  return `配置不合法:\n${issues}${error.issues.length > 5 ? `\n  …还有 ${error.issues.length - 5} 处` : ""}`
+}
+
+export class ConfigError extends Error {}

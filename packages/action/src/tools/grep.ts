@@ -1,18 +1,18 @@
 // @tau/action — tools/grep.ts:grep 工具。按行正则/子串匹配工作区文件;
 // 二进制与超大文件跳过,结果带上下文行号,上限内返回。
 
-import { readFileSync, statSync } from "node:fs"
+import { readFileSync } from "node:fs"
 import { relative } from "node:path"
 import { toolError, toolResult } from "@tau/contract"
 import type { ToolResult } from "@tau/contract"
 import { ToolErrorException, type ExecuteRequest } from "../runtime.ts"
 import { isBinary } from "../runtime.ts"
-import { PathBoundary, walk } from "./common.ts"
+import type { WorkspaceIndex } from "../workspace.ts"
 
 const MAX_HITS = 200
 const MAX_FILE_BYTES = 1024 * 1024
 
-export function makeGrepTool(boundary: PathBoundary) {
+export function makeGrepTool(index: WorkspaceIndex) {
   return async (req: ExecuteRequest): Promise<ToolResult> => {
     const pattern = String(req.args.pattern ?? "")
     const pathIn = typeof req.args.path === "string" && req.args.path !== "" ? req.args.path : "."
@@ -24,21 +24,15 @@ export function makeGrepTool(boundary: PathBoundary) {
     } catch (err) {
       throw new ToolErrorException(toolError("rejected", `grep:非法正则(${err instanceof Error ? err.message : String(err)})`))
     }
-    const root = boundary.resolve(cwd, pathIn)
+    const root = index.resolveWithin(cwd, pathIn)
 
     let hits = 0
     const lines: string[] = []
-    const files = walk(root, { maxDepth: 10 })
+    const files = index.walkAll(root)
     for (const f of files) {
       if (hits >= MAX_HITS) break
       if (f.isDir) continue
-      let size = 0
-      try {
-        size = statSync(f.path).size
-      } catch {
-        continue
-      }
-      if (size === 0 || size > MAX_FILE_BYTES) continue
+      if (f.size === 0 || f.size > MAX_FILE_BYTES) continue
       let text: string
       try {
         text = readFileSync(f.path).toString("utf8")

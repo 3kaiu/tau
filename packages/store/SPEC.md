@@ -34,7 +34,7 @@
 - `sqlite.ts`:开启 WAL、外键、busy_timeout;写入走批量事务;复杂对象(Message/Event/SessionSnapshot)存 JSON blob,查询字段提为列;事件/消息按 AUTOINCREMENT seq 保序
 - `memory.ts`:与 sqlite 行为逐项对齐,store 单测覆盖两驱动对齐(排序键/注册表/迁移语义)
 - `sqlite.ts` 补充:`kv.list(prefix)` 用 `substr(key,1,n) = prefix` 而非 `LIKE prefix||'%'`——前缀里的 `%`/`_` 是 LIKE 元字符,会把 `100%off` 这类键匹配歪
-- `migrate.ts`:迁移幂等(forward-only,不回滚);版本号记在 kv 表(当前 `SCHEMA_VERSION = 2`);首次迁移建全量表(sessions/messages/events/audit/audit_archive + 索引);v2 追加 `idx_sessions_updated (updated_at DESC, session_id ASC)`——治理面 `sessions.list` 的排序键。建索引语句一律 `IF NOT EXISTS` 且每次打开库都执行,老库无需重建即可获得新索引
+- `migrate.ts`:迁移幂等(forward-only,不回滚);版本号记在 kv 表(当前 `SCHEMA_VERSION = 6`);首次迁移建全量表(sessions/messages/events/audit/audit_archive/artifacts + 索引);v2 追加 `idx_sessions_updated (updated_at DESC, session_id ASC)`——治理面 `sessions.list` 的排序键;v6 追加 `artifacts` 表(大载荷正文:ref/session_id/mime/size/hash/body,索引 `(session_id, ref)`)。建索引语句一律 `IF NOT EXISTS` 且每次打开库都执行,老库无需重建即可获得新索引
 
 ## 开源依赖
 `drizzle-orm`(查询层,已声明;当前实现直接用 `bun:sqlite`,drizzle 留作复杂查询扩展)。SQLite 本体 Bun 内置,零额外二进制。

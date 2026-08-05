@@ -2,7 +2,7 @@
 // 与 sqlite 行为逐项对齐(差分测试兜底在 eval);单写者语义以所有权抛错表达。
 
 import type { Event, Message, SessionSnapshot } from "@tau/contract"
-import type { AuditEntry, AuditQuery, AuditTable, EventTable, KvEntry, KvTable, MessagePage, MessageTable, SessionTable, Store } from "./store.ts"
+import type { ArtifactMeta, ArtifactRecord, ArtifactTable, AuditEntry, AuditQuery, AuditTable, EventTable, KvEntry, KvTable, MessagePage, MessageTable, SessionTable, Store } from "./store.ts"
 import { extractSearchText, normalizeSearchQuery } from "./store.ts"
 
 class MemorySessionTable implements SessionTable {
@@ -125,6 +125,25 @@ class MemoryKvTable implements KvTable {
   }
 }
 
+class MemoryArtifactTable implements ArtifactTable {
+  readonly map = new Map<string, ArtifactRecord>()
+  put(record: ArtifactRecord): void {
+    this.map.set(record.ref, record)
+  }
+  get(ref: string): ArtifactRecord | null {
+    return this.map.get(ref) ?? null
+  }
+  delete(ref: string): void {
+    this.map.delete(ref)
+  }
+  list(sessionId: string): readonly ArtifactMeta[] {
+    return Array.from(this.map.values())
+      .filter((r) => r.sessionId === sessionId)
+      .sort((a, b) => a.ref.localeCompare(b.ref))
+      .map(({ ref, mime, size, hash }) => ({ ref, ...(mime !== undefined ? { mime } : {}), size, hash }) as ArtifactMeta)
+  }
+}
+
 export class MemoryStore implements Store {
   readonly driver = "memory" as const
   readonly sessions = new MemorySessionTable()
@@ -132,6 +151,7 @@ export class MemoryStore implements Store {
   readonly events = new MemoryEventTable()
   readonly audit = new MemoryAuditTable()
   readonly kv = new MemoryKvTable()
+  readonly artifacts = new MemoryArtifactTable()
 
   tx<T>(work: () => T): T {
     // 内存实现天然单线程原子;批量语义与 sqlite 事务对齐(全部成功或整体失败)

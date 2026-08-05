@@ -1,30 +1,7 @@
-// @tau/action — tools/common.ts:路径契约、分页暂存与目录遍历。
-// 相对路径相对会话 cwd;越出 workspaceRoots 直接拒绝(防 ../ 逃逸);遍历跳过隐藏目录与 node_modules。
+// @tau/action — tools/common.ts:分页暂存与工具侧公共件。
+// 路径契约(根列表/越界/忽略规则)已迁入 workspace.ts WorkspaceIndex,本文件不再持有。
 
-import { join, resolve, relative, isAbsolute, normalize } from "node:path"
-import { readdirSync, statSync } from "node:fs"
-
-export class PathBoundary {
-  readonly roots: readonly string[]
-
-  constructor(roots: readonly string[]) {
-    this.roots = roots
-  }
-
-  /** 解析相对/绝对路径并做边界检查。越界抛权限错误。 */
-  resolve(cwd: string, pathIn: string): string {
-    const candidate = isAbsolute(pathIn) ? pathIn : resolve(cwd, pathIn)
-    const normalized = normalize(candidate)
-    for (const root of this.roots) {
-      const rootPath = resolve(root)
-      if (normalized === rootPath || normalized.startsWith(rootPath + "/")) {
-        return normalized
-      }
-    }
-    const rel = relative(this.roots[0] ?? cwd, normalized)
-    throw new Error(`越界拒绝:${pathIn} 在 workspaceRoots 之外(${rel})`)
-  }
-}
+import { join } from "node:path"
 
 export class ResultPageStore {
   private readonly pages = new Map<string, { text: string; maxBytes: number }>()
@@ -53,41 +30,4 @@ export class ResultPageStore {
 
 export function pathJoin(cwd: string, ...parts: string[]): string {
   return join(cwd, ...parts)
-}
-
-const SKIP_DIRS = new Set([".git", ".hg", ".svn", "node_modules", ".next", ".turbo", "dist", ".workbuddy"])
-
-/** 深度优先目录遍历(同步,限制深度与文件数,防爆炸)。 */
-export function walk(
-  root: string,
-  opts: { maxDepth?: number; maxFiles?: number } = {},
-): { path: string; isDir: boolean }[] {
-  const maxDepth = opts.maxDepth ?? 8
-  const maxFiles = opts.maxFiles ?? 2000
-  const out: { path: string; isDir: boolean }[] = []
-  const visit = (dir: string, depth: number): void => {
-    if (out.length >= maxFiles || depth > maxDepth) return
-    let entries: string[]
-    try {
-      entries = readdirSync(dir)
-    } catch {
-      return
-    }
-    entries.sort()
-    for (const name of entries) {
-      if (out.length >= maxFiles) return
-      const full = join(dir, name)
-      let isDir = false
-      try {
-        isDir = statSync(full).isDirectory()
-      } catch {
-        continue
-      }
-      if (isDir && SKIP_DIRS.has(name)) continue
-      out.push({ path: full, isDir })
-      if (isDir) visit(full, depth + 1)
-    }
-  }
-  visit(root, 0)
-  return out
 }

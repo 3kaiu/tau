@@ -2,6 +2,7 @@
 // project() 是全世界唯一把状态变成 LLM 输入的地方;先落盘后响应;一切自动行为进投影。
 
 import {
+  type ArtifactBlock,
   type Clock,
   type Event,
   type Goal,
@@ -13,21 +14,25 @@ import {
   ModelSchema,
   recentActivityFrom,
 } from "@tau/contract"
-import type { Store } from "@tau/store"
+import type { ArtifactMeta, Store } from "@tau/store"
 import { Epoch } from "./epoch.ts"
-import { compactionCandidates } from "./history.ts"
+import { storeArtifact, readArtifact, listArtifacts, purgeArtifact, externalizeContent, DEFAULT_ARTIFACT_THRESHOLD_BYTES, type ArtifactBody } from "./artifacts.ts"
+import { runCompact } from "./compaction.ts"
 import { project, type ProjectorOptions } from "./projector.ts"
 import {
   EMPTY_USAGE,
   buildSnapshot,
+  loadCommittedTurn,
   loadGoals,
   loadPending,
   loadSummaryIds,
   loadUsage,
+  saveCommittedTurn,
   saveGoals,
   savePending,
   saveSummaryIds,
   saveUsage,
+  uncommittedSyscalls,
   type UsageState,
 } from "./snapshot.ts"
 import { type Retrieved } from "./retrieve.ts"
@@ -46,6 +51,8 @@ export type SessionOptions = Partial<ProjectorOptions> & {
   onEvent?: (event: Event) => void
   now?: () => string
   monotonic?: () => number
+  /** text 块超此字节数 → 外置为 artifact 引用(正文存 store,历史仅引用;缺省 16KB)。 */
+  artifactThresholdBytes?: number
 }
 
 /** 缺省投影配置:调用方只传关心的字段,其余走基线(自包含,不散落 ?? 判断)。 */
@@ -75,6 +82,7 @@ export function normalizeProjectorOptions(sessionId: string, options: Partial<Pr
     workspaceRoots: options.workspaceRoots ?? [cwd],
     extraSystemBlocks: options.extraSystemBlocks ?? [],
     tools: options.tools ?? [],
+    ...(options.toolTierRules !== undefined ? { toolTierRules: options.toolTierRules } : {}),
   }
 }
 
@@ -106,6 +114,10 @@ export interface Session {
   recordUsage(usage: { promptTokens: number; completionTokens: number; totalTokens: number; cacheReadTokens?: number }): void
   beginTurn(): void
   recordToolCall(): void
+  /** 按需注入请求(tier 规则存在时生效):本 turn 内请求过的 T1 工具进投影;beginTurn 重置。 */
+  requestTools(names: readonly string[]): void
+  /** 提交 turn(提交点边界):orchestrate 在 turn 尾部(全部 syscall 结果落盘后)调用;悬置判定以此为锚。 */
+  commitTurn(turnId: string): void
   compact(reason: string, summaryText: string): void
   retrieve(options: { query: string; offset?: number; limit?: number }): { results: readonly Retrieved[]; total: number }
   diff(fromEpoch: number, toEpoch: number): SessionDiff
@@ -114,6 +126,11 @@ export interface Session {
   archive(): void
   /** 归档/关闭的会话置回 active(治理面 resume;历史不删,只改状态)。 */
   resume(): void
+  /** 大载荷:正文落 store,历史仅引用(模型按需检索,不烧上下文)。 */
+  storeArtifact(input: { ref?: string; content: string; mime?: string }): ArtifactBlock
+  readArtifact(ref: string): ArtifactBody | null
+  listArtifacts(): readonly ArtifactMeta[]
+  purgeArtifact(ref: string): void
 }
 
 const uuid = () => crypto.randomUUID()
@@ -138,6 +155,7 @@ export function createSession(options: SessionOptions): Session {
   let cachedProjection: ReturnType<typeof project> | null = null
   let cachedEpoch = -1
   const epochHistory = new Map<number, { ids: string[]; usage: UsageState }>()
+  const requestedT1 = new Set<string>()
 
   function emit(event: Event): void {
     store.events.append(sessionId, event)
@@ -177,17 +195,24 @@ export function createSession(options: SessionOptions): Session {
     }
     const hasWork = store.messages.count(sessionId) > 0
     if (hasWork && status === "active") {
-      recoveryNotice =
-        "上次 turn 未提交:期间副作用可能已落盘且无法回滚,先 git status 确认现场再继续"
-      emit({
-        id: uuid(),
-        timestamp: clock().wall,
-        redact: [],
-        kind: "recovery",
-        from: `crash@${events.length}`,
-        detail: recoveryNotice,
-      })
-      emit({ id: uuid(), timestamp: clock().wall, redact: [], kind: "lifecycle", sessionId, state: "active" })
+      // 副作用悬置判定:审计带 turnId(提交点 = turn 尾部 commitTurn),崩溃必然发生在 turn 中途,
+      // "审计最后一条带 turnId 的记录 ≠ 已提交 turn" = 该 turn 未提交,其 syscall 均为悬置——告警带清单,模型检查文件而非瞎猜
+      const pending = uncommittedSyscalls(store.audit.query({ sessionId }), loadCommittedTurn(store, sessionId))
+      if (pending.entries.length > 0 || pending.indeterminate) {
+        const list = pending.entries.map((e) => `${e.toolName}(${e.argsSummary.slice(0, 120)})`).join("; ")
+        recoveryNotice = pending.indeterminate
+          ? "上次 turn 未提交:期间副作用可能已落盘且无法回滚,先 git status 确认现场再继续"
+          : `上次 turn 未提交,以下 syscall 已执行但 turn 未收尾,副作用可能已落盘且无法回滚:${list};先检查现场再继续`
+        emit({
+          id: uuid(),
+          timestamp: clock().wall,
+          redact: [],
+          kind: "recovery",
+          from: `crash@${events.length}`,
+          detail: recoveryNotice,
+        })
+        emit({ id: uuid(), timestamp: clock().wall, redact: [], kind: "lifecycle", sessionId, state: "active" })
+      }
     }
   }
 
@@ -211,12 +236,18 @@ export function createSession(options: SessionOptions): Session {
 
   const api: Session = {
     sessionId,
+    storeArtifact: (input) => storeArtifact(store, { sessionId, ...input }),
+    readArtifact: (ref) => readArtifact(store, ref),
+    listArtifacts: () => listArtifacts(store, sessionId),
+    purgeArtifact: (ref) => purgeArtifact(store, ref),
 
     admit(input: AdmitInput): Message {
+      const artifactThreshold = options.artifactThresholdBytes ?? DEFAULT_ARTIFACT_THRESHOLD_BYTES
+      const content = externalizeContent(store, sessionId, [{ type: "text", text: input.text }], artifactThreshold)
       const message: Message = {
         id: uuid(),
         role: "user",
-        content: [{ type: "text", text: input.text }],
+        content,
         toolCalls: [],
         toolResults: [],
         interrupted: false,
@@ -241,8 +272,12 @@ export function createSession(options: SessionOptions): Session {
     },
 
     appendMessage(message: Message): void {
-      store.messages.append(sessionId, message)
-      emit({ id: uuid(), timestamp: clock().wall, redact: [], kind: "transcript", message })
+      // 大载荷外置:text 块超阈值 → artifact 引用(正文存 store,历史/投影/事件流只含引用)
+      const artifactThreshold = options.artifactThresholdBytes ?? DEFAULT_ARTIFACT_THRESHOLD_BYTES
+      const content = externalizeContent(store, sessionId, message.content, artifactThreshold)
+      const stored: Message = { ...message, content }
+      store.messages.append(sessionId, stored)
+      emit({ id: uuid(), timestamp: clock().wall, redact: [], kind: "transcript", message: stored })
       touch()
       recordEpochState()
     },
@@ -251,7 +286,7 @@ export function createSession(options: SessionOptions): Session {
       if (cachedProjection !== null && cachedEpoch === epoch.current) return cachedProjection
       const history = store.messages.list(sessionId).messages
       const input = baseProjectionInput()
-      const result = project({ ...input, history }, projectionOptions)
+      const result = project({ ...input, history, requestedT1: [...requestedT1] }, projectionOptions)
       cachedProjection = result
       cachedEpoch = epoch.current
       return result
@@ -358,7 +393,25 @@ export function createSession(options: SessionOptions): Session {
     beginTurn(): void {
       usage = { ...usage, turn: usage.turn + 1, toolCallsThisTurn: 0 }
       saveUsage(store, sessionId, usage)
+      requestedT1.clear()
       touch()
+    },
+
+    requestTools(names: readonly string[]): void {
+      if (projectionOptions.toolTierRules === undefined) return
+      const { overrides, defaultTier } = projectionOptions.toolTierRules
+      const isT1 = (name: string): boolean => {
+        const tool = projectionOptions.tools.find((t) => t.name === name)
+        return (overrides[name] ?? tool?.tier ?? defaultTier) === "T1"
+      }
+      let changed = false
+      for (const name of names) {
+        if (isT1(name) && !requestedT1.has(name)) {
+          requestedT1.add(name)
+          changed = true
+        }
+      }
+      if (changed) touch()
     },
 
     recordToolCall(): void {
@@ -367,41 +420,26 @@ export function createSession(options: SessionOptions): Session {
       touch()
     },
 
+    commitTurn(turnId: string): void {
+      saveCommittedTurn(store, sessionId, turnId)
+    },
+
     compact(reason: string, summaryText: string): void {
-      const history = store.messages.list(sessionId).messages
-      const keepRecent = 6
-      const { drop, keep } = compactionCandidates(history, keepRecent)
-      void keep
-      if (drop.length === 0) return
-      const summary: Message = {
-        id: uuid(),
-        role: "system",
-        content: [{ type: "text", text: summaryText }],
-        toolCalls: [],
-        toolResults: [],
-        interrupted: false,
-        retention: "high",
-        source: "compaction",
-        createdAt: clock().wall,
-      }
-      // 压缩交换:全文移入归档区(仍可经 retrieve 检索回取),摘要进历史——宪法七不破坏
-      store.messages.archive(
+      runCompact({
+        store,
         sessionId,
-        drop.map((m) => m.id),
-      )
-      summaryIds = [...summaryIds, summary.id]
-      saveSummaryIds(store, sessionId, summaryIds)
-      store.messages.append(sessionId, summary)
-      emit({
-        id: uuid(),
-        timestamp: clock().wall,
-        redact: [],
-        kind: "compression",
-        droppedIds: drop.map((m) => m.id),
-        strategy: reason,
+        messages: store.messages.list(sessionId).messages,
+        keepRecent: 6,
+        reason,
+        summaryText,
+        clockNow: () => clock().wall,
+        emit,
+        registerSummary: (id) => {
+          summaryIds = [...summaryIds, id]
+          saveSummaryIds(store, sessionId, summaryIds)
+        },
+        touch,
       })
-      emit({ id: uuid(), timestamp: clock().wall, redact: [], kind: "transcript", message: summary })
-      touch()
     },
 
     retrieve(optionsIn: { query: string; offset?: number; limit?: number }) {

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest"
+import { mkdirSync, writeFileSync } from "node:fs"
 import { createMemoryStore } from "@tau/store"
 import { createActionPlane } from "../src/index.ts"
+import * as createActionPlaneModule from "../src/index.ts"
 
 function fresh(autoApprove = false) {
   const store = createMemoryStore()
@@ -146,10 +148,10 @@ describe("action 平面:read/bash/write + 门 + 审计", () => {
 })
 
 describe("action 平面:补齐工具面(edit/grep/find/ls/ask_user/system/catalog/retrieve/detach)", () => {
-  it("工具目录:12 内置工具齐全", () => {
+  it("工具目录:17 内置工具齐全(14 模型可见 + 3 worktree 内部件)", () => {
     const { plane } = fresh()
     const names = plane.registry.all().map((t) => t.name).sort()
-    expect(names).toEqual(["ask_user", "bash", "edit", "fetch", "find", "grep", "ls", "read", "result", "retrieve", "system", "tool:catalog", "write"].sort())
+    expect(names).toEqual(["artifact:read", "ask_user", "bash", "edit", "fetch", "find", "grep", "ls", "read", "result", "retrieve", "system", "tool:catalog", "worktree:create", "worktree:list", "worktree:rm", "write"].sort())
   })
 
   it("edit:old→new 原子替换 + fileMeta", async () => {
@@ -333,5 +335,280 @@ describe("action 平面:grantScope 作用域预授权", () => {
     plane.grantScope(["write"], { sessionId: "s1" })
     const entries = store.audit.query({ sessionId: "s1" })
     expect(entries.some((e) => e.action === "grant:write:approved")).toBe(true)
+  })
+})
+
+describe("action 平面:executeStream 流式事件形态(P1-22)", () => {
+  function ensureFile(): void {
+    mkdirSync("/tmp/tau-test", { recursive: true })
+    writeFileSync("/tmp/tau-test/hello.txt", "hello")
+  }
+
+  it("成功路径:started → completed(带结果),execute 收口与终态一致", async () => {
+    ensureFile()
+    const { plane } = fresh(true)
+    const events: import("@tau/contract").ToolEvent[] = []
+    for await (const ev of plane.executeStream({ sessionId: "s", toolCallId: "c1", name: "read", args: { path: "/tmp/tau-test/hello.txt" }, cwd: "/tmp/tau-test" })) {
+      events.push(ev)
+    }
+    expect(events[0]?.state).toBe("started")
+    expect(events[events.length - 1]?.state).toBe("completed")
+    expect(events.some((e) => e.state === "failed")).toBe(false)
+    const last = events[events.length - 1]!
+    if (last.state === "completed" && last.result !== undefined) {
+      const out = await plane.execute({ sessionId: "s", toolCallId: "c1", name: "read", args: { path: "/tmp/tau-test/hello.txt" }, cwd: "/tmp/tau-test" })
+      expect(out.ok).toBe(true)
+      if (out.ok) expect(out.result).toEqual(last.result)
+    }
+  })
+
+  it("失败路径:started → failed(带错误码),execute 收口与终态一致", async () => {
+    const { plane } = fresh(true)
+    const events: import("@tau/contract").ToolEvent[] = []
+    for await (const ev of plane.executeStream({ sessionId: "s", toolCallId: "c2", name: "read", args: { path: "/tmp/tau-test/__nope__.txt" }, cwd: "/tmp/tau-test" })) {
+      events.push(ev)
+    }
+    expect(events[0]?.state).toBe("started")
+    const last = events[events.length - 1]!
+    expect(last.state).toBe("failed")
+    if (last.state === "failed" && last.error !== undefined) {
+      expect(last.error.code).toBe("not_found")
+      const out = await plane.execute({ sessionId: "s", toolCallId: "c2", name: "read", args: { path: "/tmp/tau-test/__nope__.txt" }, cwd: "/tmp/tau-test" })
+      expect(out.ok).toBe(false)
+      if (!out.ok) expect(out.error.code).toBe("not_found")
+    }
+  })
+
+  it("门拒绝路径:只发 failed(rejected),无 started", async () => {
+    const { plane } = fresh(false)
+    const eventsPromise = (async () => {
+      const events: import("@tau/contract").ToolEvent[] = []
+      for await (const ev of plane.executeStream({ sessionId: "s", toolCallId: "c3", name: "bash", args: { command: "echo hi" }, cwd: "/tmp/tau-test" })) {
+        events.push(ev)
+      }
+      return events
+    })()
+    for (let i = 0; i < 1000 && plane.permissionRequest().length === 0; i++) await Bun.sleep(3)
+    expect(plane.deny("c3")).toBe(true)
+    const events = await eventsPromise
+    expect(events).toHaveLength(1)
+    expect(events[0]?.state).toBe("failed")
+  })
+
+  it("事件也进 onEvent 双轨(全局桥与流不互斥)", async () => {
+    ensureFile()
+    const store = createMemoryStore()
+    const collected: unknown[] = []
+    const plane = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true, onEvent: (e) => collected.push(e) })
+    const streamed: import("@tau/contract").ToolEvent[] = []
+    for await (const ev of plane.executeStream({ sessionId: "s", toolCallId: "c4", name: "read", args: { path: "/tmp/tau-test/hello.txt" }, cwd: "/tmp/tau-test" })) {
+      streamed.push(ev)
+    }
+    expect(collected.filter((e) => (e as { kind?: string }).kind === "tool").length).toBe(streamed.length)
+    expect(collected.length).toBeGreaterThanOrEqual(streamed.length)
+  })
+})
+
+describe("action 平面:artifact:read 检索工具(M10.3-b)", () => {
+  it("外置正文按引用取回;缺 ref 拒绝;不存在 not_found", async () => {
+    const store = createMemoryStore()
+    const plane = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
+    const big = "z".repeat(2_000)
+    store.artifacts.put({ ref: "art-abc123", sessionId: "s", size: big.length, hash: "h", body: big, createdAt: new Date().toISOString() })
+
+    const got = await plane.execute({ sessionId: "s", toolCallId: "a1", name: "artifact:read", args: { ref: "art-abc123" }, cwd: "/tmp/tau-test" })
+    expect(got.ok).toBe(true)
+    if (got.ok) expect(got.result.stdout).toBe(big)
+
+    const missing = await plane.execute({ sessionId: "s", toolCallId: "a2", name: "artifact:read", args: { ref: "art-nope" }, cwd: "/tmp/tau-test" })
+    expect(missing.ok).toBe(false)
+    if (!missing.ok) expect(missing.error.code).toBe("not_found")
+
+    const emptyRef = await plane.execute({ sessionId: "s", toolCallId: "a3", name: "artifact:read", args: {}, cwd: "/tmp/tau-test" })
+    expect(emptyRef.ok).toBe(false)
+    if (!emptyRef.ok) expect(emptyRef.error.code).toBe("rejected")
+  })
+})
+
+describe("action 平面:workspace 文件树增量索引(M10.3-d)", () => {
+  const { WorkspaceIndex } = createActionPlaneModule
+  let root = ""
+
+  function makeTree(ts: string) {
+    root = `/tmp/tau-index-test-${Date.now()}-${ts}`
+    mkdirSync(`${root}/a/src`, { recursive: true })
+    mkdirSync(`${root}/a/sub`, { recursive: true })
+    writeFileSync(`${root}/c.ts`, "c")
+    writeFileSync(`${root}/a/src/a.ts`, "a")
+    writeFileSync(`${root}/a/sub/b.ts`, "b")
+  }
+
+  it("WorkspaceIndex 冷扫全量;重复 refresh 零重扫(目录 mtime 命中)", () => {
+    makeTree("t1")
+    const index = new WorkspaceIndex()
+    const all = index.walkAll(root)
+    expect(all.length).toBe(6)
+    const stats1 = index.stats()
+    expect(stats1).toMatchObject({ dirs: 4, fullScans: 1 })
+
+    index.walkAll(root)
+    const stats2 = index.stats()
+    expect(stats2.dirHits).toBe(4)
+    expect(stats2.dirRescans).toBe(4)
+    expect(stats2.fullScans).toBe(1)
+  })
+
+  it("子目录新增文件:只重扫该目录,不全量重扫,find 立即可见", () => {
+    makeTree("t2")
+    const index = new WorkspaceIndex()
+    index.walkAll(root)
+
+    writeFileSync(`${root}/a/sub/new.ts`, "new")
+    const all = index.walkAll(root)
+    expect(all.some((e) => e.path.endsWith("a/sub/new.ts"))).toBe(true)
+    const stats = index.stats()
+    expect(stats.fullScans).toBe(1)
+    expect(stats.dirRescans).toBe(5)
+    expect(stats.dirHits).toBe(3)
+  })
+
+  it("删除子目录:条目消失且缓存键被剪除(无幽灵条目)", () => {
+    makeTree("t3")
+    const index = new WorkspaceIndex()
+    index.walkAll(root)
+
+    const { rmSync } = require("node:fs") as typeof import("node:fs")
+    rmSync(`${root}/a/sub`, { recursive: true })
+    const all = index.walkAll(root)
+    expect(all.some((e) => e.path.includes("sub"))).toBe(false)
+    expect(index.stats().dirs).toBe(3)
+  })
+
+  it("文件内容编辑不改目录 mtime:结构查询零重扫", () => {
+    makeTree("t4")
+    const index = new WorkspaceIndex()
+    index.walkAll(root)
+    const hitsBefore = index.stats().dirHits
+
+    writeFileSync(`${root}/a/src/a.ts`, "a".repeat(1000))
+    index.walkAll(root)
+    const stats = index.stats()
+    expect(stats.dirRescans).toBe(4)
+    expect(stats.dirHits).toBe(hitsBefore + 4)
+  })
+
+  it("find 工具走索引且不牺牲新鲜度(新文件立即命中)", async () => {
+    makeTree("t5")
+    const store = createMemoryStore()
+    const plane = createActionPlane(store, { workspaceRoots: [root], autoApprove: true })
+
+    const first = await plane.execute({ sessionId: "s", toolCallId: "f1", name: "find", args: { name: "b.ts" }, cwd: root })
+    expect(first.ok).toBe(true)
+    if (first.ok) expect(first.result.stdout).toContain("a/sub/b.ts")
+
+    writeFileSync(`${root}/a/src/zz-b.ts`, "x")
+    const second = await plane.execute({ sessionId: "s", toolCallId: "f2", name: "find", args: { name: "zz-b" }, cwd: root })
+    expect(second.ok).toBe(true)
+    if (second.ok) expect(second.result.stdout).toContain("a/src/zz-b.ts")
+  })
+})
+
+describe("action 平面:workspace 模型统一(M10.5:gitignore + 越界归属 + worktree)", () => {
+  const { WorkspaceIndex } = createActionPlaneModule
+  let root = ""
+
+  function makeTree(ts: string) {
+    root = `/tmp/tau-ws-test-${Date.now()}-${ts}`
+    mkdirSync(`${root}/build`, { recursive: true })
+    mkdirSync(`${root}/src`, { recursive: true })
+    writeFileSync(`${root}/a.log`, "a")
+    writeFileSync(`${root}/keep.log`, "k")
+    writeFileSync(`${root}/src/a.ts`, "a")
+    writeFileSync(`${root}/src/b.txt`, "b")
+    writeFileSync(`${root}/build/x.js`, "x")
+  }
+
+  it("gitignore 匹配树:忽略文件与目录,否定规则放行", () => {
+    makeTree("t1")
+    writeFileSync(`${root}/.gitignore`, "*.log\nbuild/\n!keep.log\n")
+    const index = new WorkspaceIndex()
+    const paths = index.walkAll(root).map((e) => e.path.slice(root.length + 1)).sort()
+    expect(paths).toEqual([".gitignore", "keep.log", "src", "src/a.ts", "src/b.txt"])
+    expect(index.stats().dirs).toBe(2)
+  })
+
+  it("gitignore 变更即失效:目录 mtime 未变也整根重扫(不牺牲新鲜度)", () => {
+    makeTree("t2")
+    writeFileSync(`${root}/.gitignore`, "*.log\n")
+    const index = new WorkspaceIndex()
+    index.walkAll(root)
+    const before = index.stats().fullScans
+
+    writeFileSync(`${root}/.gitignore`, "*.log\nsrc/\n")
+    const paths = index.walkAll(root).map((e) => e.path.slice(root.length + 1)).sort()
+    expect(paths).toEqual([".gitignore", "build", "build/x.js"])
+    expect(index.stats().fullScans).toBe(before + 1)
+  })
+
+  it("越界校验归属:多根边界,resolveWithin 拒绝根外路径", () => {
+    makeTree("t3")
+    const index = new WorkspaceIndex([root, `${root}/src`])
+    expect(index.resolveWithin(root, "./src/a.ts")).toBe(`${root}/src/a.ts`)
+    expect(index.resolveWithin(`${root}/src`, "a.ts")).toBe(`${root}/src/a.ts`)
+    expect(index.resolveWithin(`${root}/src`, "../a.log")).toBe(`${root}/a.log`)
+    expect(() => index.resolveWithin(root, `${root}/build/x.js`)).not.toThrow()
+    expect(() => index.resolveWithin(root, `/etc/passwd`)).toThrow(/越界拒绝/)
+    const outside = new WorkspaceIndex([root])
+    expect(outside.contains(`${root}/a.log`)).toBe(true)
+    expect(outside.contains(`/etc`)).toBe(false)
+  })
+
+  it("find/ls 与索引同源:被忽略条目不进命中集;read 仍可直读(行为统一)", async () => {
+    makeTree("t4")
+    writeFileSync(`${root}/.gitignore`, "*.log\n")
+    const store = createMemoryStore()
+    const plane = createActionPlane(store, { workspaceRoots: [root], autoApprove: true })
+
+    const find = await plane.execute({ sessionId: "s", toolCallId: "w1", name: "find", args: { name: "log" }, cwd: root })
+    expect(find.ok).toBe(true)
+    if (find.ok) expect(find.result.stdout).toContain("0 命中")
+
+    const ls = await plane.execute({ sessionId: "s", toolCallId: "w2", name: "ls", args: {}, cwd: root })
+    expect(ls.ok).toBe(true)
+    if (ls.ok) {
+      expect(ls.result.stdout).toContain(".gitignore")
+      expect(ls.result.stdout).not.toContain("a.log")
+      expect(ls.result.stdout).toContain("src")
+    }
+
+    const read = await plane.execute({ sessionId: "s", toolCallId: "w3", name: "read", args: { path: "a.log" }, cwd: root })
+    expect(read.ok).toBe(true)
+    if (read.ok) expect(read.result.stdout).toContain("a")
+  })
+
+  it("worktree 生命周期:create/list/rm + 名称契约 + 模型视野隐藏", async () => {
+    makeTree("t5")
+    const store = createMemoryStore()
+    const plane = createActionPlane(store, { workspaceRoots: [root], autoApprove: true })
+
+    const created = await plane.execute({ sessionId: "s", toolCallId: "w4", name: "worktree:create", args: { name: "run-1" }, cwd: root })
+    expect(created.ok).toBe(true)
+    if (created.ok) expect(created.result.stdout).toBe(`${root}/.tau-worktrees/run-1`)
+
+    const listed = await plane.execute({ sessionId: "s", toolCallId: "w5", name: "worktree:list", args: {}, cwd: root })
+    expect(listed.ok).toBe(true)
+    if (listed.ok) expect(listed.result.stdout).toContain("run-1")
+
+    const bad = await plane.execute({ sessionId: "s", toolCallId: "w6", name: "worktree:create", args: { name: "../escape" }, cwd: root })
+    expect(bad.ok).toBe(false)
+    if (!bad.ok) expect(bad.error.code).toBe("rejected")
+
+    const find = await plane.execute({ sessionId: "s", toolCallId: "w7", name: "find", args: { name: "run-1" }, cwd: root })
+    if (find.ok) expect(find.result.stdout).toContain("0 命中")
+
+    const rm = await plane.execute({ sessionId: "s", toolCallId: "w8", name: "worktree:rm", args: { name: "run-1" }, cwd: root })
+    expect(rm.ok).toBe(true)
+    const listed2 = await plane.execute({ sessionId: "s", toolCallId: "w9", name: "worktree:list", args: {}, cwd: root })
+    if (listed2.ok) expect(listed2.result.stdout).toContain("0 条目")
   })
 })

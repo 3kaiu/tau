@@ -41,6 +41,11 @@ export function makeBashTool(pageStore: ResultPageStore, tasks: BackgroundTaskSt
     if (detach) {
       const taskId = req.toolCallId
       const proc = spawn()
+      if (req.signal?.aborted) {
+        proc.kill("SIGTERM")
+      } else {
+        req.signal?.addEventListener("abort", () => proc.kill("SIGTERM"), { once: true })
+      }
       void (async () => {
         const [stdoutBuf] = await Promise.all([
           new Response(proc.stdout).arrayBuffer(),
@@ -55,6 +60,15 @@ export function makeBashTool(pageStore: ResultPageStore, tasks: BackgroundTaskSt
     }
 
     const proc = spawn()
+    // 中断信号(steer 立即断流):终止进程树(子进程受平台限制,macOS 无进程组,SIGTERM + 兜底 SIGKILL)
+    if (req.signal?.aborted) {
+      proc.kill("SIGTERM")
+    } else {
+      req.signal?.addEventListener("abort", () => {
+        proc.kill("SIGTERM")
+        setTimeout(() => proc.kill("SIGKILL"), 3_000)
+      }, { once: true })
+    }
     const [stdoutBuf, stderrBuf] = await Promise.all([
       new Response(proc.stdout).arrayBuffer(),
       new Response(proc.stderr).arrayBuffer(),

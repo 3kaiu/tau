@@ -3,9 +3,9 @@
 
 import { z } from "zod"
 
-/** 工具分级:T0 常驻每轮注入;T1 按需经 tool:catalog 查询后注入本 turn。
- * 每轮工具描述 token 只花在会用到的上。 */
-export const ToolTierSchema = z.enum(["T0", "T1"])
+/** 工具分级:T0 常驻每轮注入;T1 按需经 tool:catalog 查询后注入本 turn;
+ * T2 内部机制(orchestrate/action 编排层专用,如 worktree),永不注入投影。 */
+export const ToolTierSchema = z.enum(["T0", "T1", "T2"])
 export type ToolTier = z.infer<typeof ToolTierSchema>
 
 /** 模型能力面。投影裁剪依据:能力缺则对应工具/system 块不注入。 */

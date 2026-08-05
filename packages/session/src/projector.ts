@@ -16,6 +16,7 @@ import {
   type RecentActivity,
   type SystemBlock,
   type SystemCall,
+  type ToolTierRules,
   type TurnBudget,
   type Wake,
 } from "@tau/contract"
@@ -38,6 +39,8 @@ export type ProjectorOptions = {
   maxContextTokens: number
   extraSystemBlocks: readonly SystemBlock[]
   tools: readonly SystemCall[]
+  /** Config tier 规则:缺省 = 全量注入(兼容现状);提供规则时按 tier 裁剪(见 ProjectorInput.requestedT1)。 */
+  toolTierRules?: ToolTierRules
   onBudgetExceeded: "abort" | "pause" | "ask"
 }
 
@@ -53,6 +56,20 @@ export type ProjectorInput = {
   clock: Clock
   budgetAlarm: boolean
   recoveryNotice: string | null
+  /** 本 turn 已注入的 T1 工具名(经 tool:catalog 发现后按需请求);仅 toolTierRules 存在时生效。 */
+  requestedT1?: readonly string[]
+}
+
+/** 工具注入裁剪:T2(内部机制)永不注入;无 tier 规则 → 其余全量注入;有 → T0 常驻 + 本 turn 请求过的 T1 + tool:catalog(发现入口)恒在。 */
+function injectedTools(opts: ProjectorOptions, input: ProjectorInput): SystemCall[] {
+  if (opts.toolTierRules === undefined) return [...opts.tools].filter((tool) => tool.tier !== "T2")
+  const { overrides, defaultTier } = opts.toolTierRules
+  const requested = new Set(input.requestedT1 ?? [])
+  return opts.tools.filter((tool) => {
+    if (tool.tier === "T2") return false
+    const effectiveTier = overrides[tool.name] ?? tool.tier ?? defaultTier
+    return effectiveTier === "T0" || requested.has(tool.name) || tool.name === "tool:catalog"
+  })
 }
 
 export function project(input: ProjectorInput, opts: ProjectorOptions): ContextProjection {
@@ -62,7 +79,7 @@ export function project(input: ProjectorInput, opts: ProjectorOptions): ContextP
     wake: input.wake,
     system,
     history: [...input.history],
-    tools: [...opts.tools],
+    tools: injectedTools(opts, input),
     self: {
       model: {
         id: opts.model.id,

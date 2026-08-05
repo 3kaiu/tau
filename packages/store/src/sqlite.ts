@@ -3,7 +3,7 @@
 
 import { Database, type Statement } from "bun:sqlite"
 import type { Event, Message, SessionSnapshot } from "@tau/contract"
-import type { AuditEntry, AuditQuery, AuditTable, EventTable, KvEntry, KvTable, MessagePage, MessageTable, SessionTable, Store } from "./store.ts"
+import type { ArtifactMeta, ArtifactRecord, ArtifactTable, AuditEntry, AuditQuery, AuditTable, EventTable, KvEntry, KvTable, MessagePage, MessageTable, SessionTable, Store } from "./store.ts"
 import { extractSearchText, normalizeSearchQuery } from "./store.ts"
 import { migrate, type Db } from "./migrate.ts"
 
@@ -250,11 +250,11 @@ class SqliteAuditTable implements AuditTable {
 
   constructor(db: Db) {
     this.appendStmt = db.prepare(
-      `INSERT INTO audit (id, session_id, timestamp, actor, action, detail)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO audit (id, session_id, timestamp, actor, action, detail, turn_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
     this.queryStmt = db.prepare(
-      `SELECT id, session_id, timestamp, actor, action, detail FROM audit
+      `SELECT id, session_id, timestamp, actor, action, detail, turn_id FROM audit
        WHERE (? IS NULL OR session_id = ?)
          AND (? IS NULL OR actor = ?)
        ORDER BY timestamp DESC, rowid DESC
@@ -263,7 +263,7 @@ class SqliteAuditTable implements AuditTable {
   }
 
   append(entry: AuditEntry): void {
-    this.appendStmt.run(entry.id, entry.sessionId, entry.timestamp, entry.actor, entry.action, entry.detail)
+    this.appendStmt.run(entry.id, entry.sessionId, entry.timestamp, entry.actor, entry.action, entry.detail, entry.turnId ?? null)
   }
 
   query(q: AuditQuery): readonly AuditEntry[] {
@@ -272,8 +272,59 @@ class SqliteAuditTable implements AuditTable {
       q.sessionId ?? null, q.sessionId ?? null,
       q.actor ?? null, q.actor ?? null,
       limit,
-    ) as AuditEntry[]
-    return rows
+    ) as Record<string, unknown>[]
+    return rows.map((r) => ({ ...r, turnId: r.turn_id === null ? undefined : String(r.turn_id) }) as unknown as AuditEntry)
+  }
+}
+
+// ---------- ArtifactTable ----------
+
+class SqliteArtifactTable implements ArtifactTable {
+  private readonly putStmt: Statement
+  private readonly getStmt: Statement
+  private readonly deleteStmt: Statement
+  private readonly listStmt: Statement
+
+  constructor(db: Db) {
+    this.putStmt = db.prepare(
+      `INSERT INTO artifacts (ref, session_id, mime, size, hash, body, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(ref) DO UPDATE SET
+         session_id = excluded.session_id, mime = excluded.mime, size = excluded.size,
+         hash = excluded.hash, body = excluded.body, created_at = excluded.created_at`,
+    )
+    this.getStmt = db.prepare("SELECT * FROM artifacts WHERE ref = ?")
+    this.deleteStmt = db.prepare("DELETE FROM artifacts WHERE ref = ?")
+    this.listStmt = db.prepare(
+      "SELECT ref, mime, size, hash FROM artifacts WHERE session_id = ? ORDER BY ref ASC",
+    )
+  }
+
+  put(record: ArtifactRecord): void {
+    this.putStmt.run(record.ref, record.sessionId, record.mime ?? null, record.size, record.hash, record.body, record.createdAt)
+  }
+
+  get(ref: string): ArtifactRecord | null {
+    const row = this.getStmt.get(ref) as Record<string, unknown> | null
+    if (row === null) return null
+    return {
+      ref: String(row.ref),
+      sessionId: String(row.session_id),
+      ...(row.mime === null ? {} : { mime: String(row.mime) }),
+      size: Number(row.size),
+      hash: String(row.hash),
+      body: String(row.body),
+      createdAt: String(row.created_at),
+    } as ArtifactRecord
+  }
+
+  delete(ref: string): void {
+    this.deleteStmt.run(ref)
+  }
+
+  list(sessionId: string): readonly ArtifactMeta[] {
+    const rows = this.listStmt.all(sessionId) as { ref: string; mime: string | null; size: number; hash: string }[]
+    return rows.map((r) => ({ ref: r.ref, ...(r.mime === null ? {} : { mime: r.mime }), size: r.size, hash: r.hash }) as ArtifactMeta)
   }
 }
 
@@ -327,6 +378,7 @@ export class SqliteStore implements Store {
   readonly events: SqliteEventTable
   readonly audit: SqliteAuditTable
   readonly kv: SqliteKvTable
+  readonly artifacts: SqliteArtifactTable
   private readonly db: Database
   private readonly txFn: (fn: () => unknown) => unknown
   private readonly archiveAuditStmt: Statement
@@ -347,6 +399,7 @@ export class SqliteStore implements Store {
     this.events = new SqliteEventTable(this.db)
     this.audit = new SqliteAuditTable(this.db)
     this.kv = new SqliteKvTable(this.db)
+    this.artifacts = new SqliteArtifactTable(this.db)
     this.archiveAuditStmt = this.db.prepare(
       `INSERT OR IGNORE INTO audit_archive
        SELECT * FROM audit WHERE session_id = ? AND timestamp < ?

@@ -4,7 +4,7 @@
 import type { Store } from "@tau/store"
 import { SystemCallSchema } from "@tau/contract"
 import { ActionPlane, type ActionPlaneOptions } from "./runtime.ts"
-import { PathBoundary, ResultPageStore } from "./tools/common.ts"
+import { ResultPageStore } from "./tools/common.ts"
 import { makeReadTool } from "./tools/read.ts"
 import { makeWriteTool } from "./tools/write.ts"
 import { makeEditTool } from "./tools/edit.ts"
@@ -17,19 +17,24 @@ import { makeSystemTool } from "./tools/system.ts"
 import { makeCatalogTool } from "./tools/catalog.ts"
 import { makeFetchTool } from "./tools/fetch.ts"
 import { makeRetrieveTool } from "./tools/retrieve.ts"
+import { makeArtifactTool } from "./tools/artifact.ts"
+import { makeWorktreeCreateTool, makeWorktreeListTool, makeWorktreeRmTool } from "./worktree.ts"
+import { WorkspaceIndex } from "./workspace.ts"
 
 export type { ActionPlane, ActionPlaneOptions, ExecuteRequest, ExecuteOutcome, PermissionRequest, PendingAsk } from "./runtime.ts"
 export { ToolRegistry } from "./registry.ts"
 export { CapabilityGate, DEFAULT_RULES } from "./capability.ts"
 export { queryAudit, recordAudit } from "./audit.ts"
-export { PathBoundary, ResultPageStore } from "./tools/common.ts"
+export { ResultPageStore } from "./tools/common.ts"
+export { WorkspaceIndex, SKIP_DIRS } from "./workspace.ts"
+export type { IndexEntry, IndexStats, LoadIgnoreFn, IgnoreFingerprint } from "./workspace.ts"
 export { createHookRegistry, auditHook, dangerousToolGate, rateLimitHook } from "./hooks.ts"
 export type { Hook, HookContext, HookPhase, HookRegistry } from "./hooks.ts"
 
 export function createActionPlane(store: Store, opts: ActionPlaneOptions = {}): ActionPlane {
   const plane = new ActionPlane(store, opts)
-  const boundary = new PathBoundary(opts.workspaceRoots ?? [process.cwd()])
   const pages = new ResultPageStore()
+  const treeIndex = new WorkspaceIndex(opts.workspaceRoots ?? [process.cwd()])
 
   const builtins: { syscall: Record<string, unknown>; executor: (req: Parameters<ActionPlane["execute"]>[0]) => Promise<unknown> }[] = [
     {
@@ -50,7 +55,7 @@ export function createActionPlane(store: Store, opts: ActionPlaneOptions = {}): 
         dangerous: false,
         defaultRule: { pattern: "read", rule: "allow", scope: "tool" },
       },
-      executor: makeReadTool(boundary),
+      executor: makeReadTool(treeIndex),
     },
     {
       syscall: {
@@ -68,7 +73,7 @@ export function createActionPlane(store: Store, opts: ActionPlaneOptions = {}): 
         dangerous: false,
         defaultRule: { pattern: "write", rule: "ask", scope: "tool" },
       },
-      executor: makeWriteTool(boundary),
+      executor: makeWriteTool(treeIndex),
     },
     {
       syscall: {
@@ -87,7 +92,7 @@ export function createActionPlane(store: Store, opts: ActionPlaneOptions = {}): 
         dangerous: false,
         defaultRule: { pattern: "write", rule: "ask", scope: "tool" },
       },
-      executor: makeEditTool(boundary),
+      executor: makeEditTool(treeIndex),
     },
     {
       syscall: {
@@ -129,6 +134,23 @@ export function createActionPlane(store: Store, opts: ActionPlaneOptions = {}): 
     },
     {
       syscall: {
+        name: "artifact:read",
+        description: "按引用取回大载荷正文(artifact 外置块)。ref 来自历史中的 artifact 引用块(带 size/hash,超阈值文本自动外置)。",
+        parameters: {
+          type: "object",
+          properties: {
+            ref: { type: "string", description: "artifact 引用(历史块中的 ref)" },
+          },
+          required: ["ref"],
+        },
+        tier: "T0",
+        dangerous: false,
+        defaultRule: { pattern: "artifact:read", rule: "allow", scope: "tool" },
+      },
+      executor: makeArtifactTool(store.artifacts),
+    },
+    {
+      syscall: {
         name: "grep",
         description: "按正则匹配工作区文件内容(跳过二进制与超大文件),返回 文件:行号: 文本。",
         parameters: {
@@ -143,7 +165,7 @@ export function createActionPlane(store: Store, opts: ActionPlaneOptions = {}): 
         dangerous: false,
         defaultRule: { pattern: "read", rule: "allow", scope: "tool" },
       },
-      executor: makeGrepTool(boundary),
+      executor: makeGrepTool(treeIndex),
     },
     {
       syscall: {
@@ -161,7 +183,7 @@ export function createActionPlane(store: Store, opts: ActionPlaneOptions = {}): 
         dangerous: false,
         defaultRule: { pattern: "read", rule: "allow", scope: "tool" },
       },
-      executor: makeFindTool(boundary),
+      executor: makeFindTool(treeIndex),
     },
     {
       syscall: {
@@ -178,7 +200,7 @@ export function createActionPlane(store: Store, opts: ActionPlaneOptions = {}): 
         dangerous: false,
         defaultRule: { pattern: "read", rule: "allow", scope: "tool" },
       },
-      executor: makeLsTool(boundary),
+      executor: makeLsTool(treeIndex),
     },
     {
       syscall: {
@@ -265,6 +287,51 @@ export function createActionPlane(store: Store, opts: ActionPlaneOptions = {}): 
         defaultRule: { pattern: "read", rule: "allow", scope: "tool" },
       },
       executor: makeRetrieveTool(pages),
+    },
+    {
+      syscall: {
+        name: "worktree:create",
+        description: "内部:编排层工作树创建(仅 orchestrate 调用,不注入模型视野)。",
+        parameters: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "工作树名(字母/数字/._-,最长 64)" },
+          },
+          required: ["name"],
+        },
+        tier: "T2",
+        dangerous: false,
+        defaultRule: { pattern: "worktree:create", rule: "allow", scope: "tool" },
+      },
+      executor: makeWorktreeCreateTool(treeIndex),
+    },
+    {
+      syscall: {
+        name: "worktree:rm",
+        description: "内部:编排层工作树清理(仅 orchestrate 调用,不注入模型视野)。",
+        parameters: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+          },
+          required: ["name"],
+        },
+        tier: "T2",
+        dangerous: false,
+        defaultRule: { pattern: "worktree:rm", rule: "allow", scope: "tool" },
+      },
+      executor: makeWorktreeRmTool(treeIndex),
+    },
+    {
+      syscall: {
+        name: "worktree:list",
+        description: "内部:枚举工作树(崩溃残留发现)。",
+        parameters: { type: "object", properties: {} },
+        tier: "T2",
+        dangerous: false,
+        defaultRule: { pattern: "worktree:list", rule: "allow", scope: "tool" },
+      },
+      executor: makeWorktreeListTool(treeIndex),
     },
   ]
 

@@ -5,7 +5,7 @@ import type { Database } from "bun:sqlite"
 
 export type Db = Database
 
-export const SCHEMA_VERSION = "4"
+export const SCHEMA_VERSION = "6"
 
 export function migrate(db: Db): void {
   // kv 表最先建(版本追踪依赖它)
@@ -100,7 +100,31 @@ export function migrate(db: Db): void {
   }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_archived ON messages(session_id, archived, seq)`)
 
-  // 未来版本迁移:v4 -> v5 -> ... 每步检查 kv 中的 version
+  // v4 -> v5:审计记录带 turnId(recovery 悬置判定的判定输入;ALTER 无 IF NOT EXISTS,PRAGMA 探测保幂等)
+  const auditCols = db.prepare("PRAGMA table_info(audit)").all() as { name: string }[]
+  if (!auditCols.some((c) => c.name === "turn_id")) {
+    db.exec(`ALTER TABLE audit ADD COLUMN turn_id TEXT`)
+  }
+  const auditArchiveCols = db.prepare("PRAGMA table_info(audit_archive)").all() as { name: string }[]
+  if (!auditArchiveCols.some((c) => c.name === "turn_id")) {
+    db.exec(`ALTER TABLE audit_archive ADD COLUMN turn_id TEXT`)
+  }
+
+  // v5 -> v6:artifact 大载荷表(正文存 store,历史仅引用;幂等建表)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS artifacts (
+      ref         TEXT PRIMARY KEY,
+      session_id  TEXT NOT NULL,
+      mime        TEXT,
+      size        INTEGER NOT NULL,
+      hash        TEXT NOT NULL,
+      body        TEXT NOT NULL,
+      created_at  TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id, ref);
+  `)
+
+  // 未来版本迁移:v6 -> v7 -> ... 每步检查 kv 中的 version
 
   db.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('schema_version', ?)").run(SCHEMA_VERSION)
 }
