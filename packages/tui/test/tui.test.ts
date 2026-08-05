@@ -94,6 +94,16 @@ describe("prompt:parseInput", () => {
     expect(parseInput("/model", sender).kind).toBe("list_models")
   })
 
+  it("/compact /permission /usage 解析", () => {
+    expect(parseInput("/compact", sender).kind).toBe("compact")
+    const auto = parseInput("/permission auto", sender)
+    expect(auto.kind).toBe("set_permission")
+    if (auto.kind === "set_permission") expect(auto.command).toMatchObject({ kind: "set_auto_approve", enabled: true })
+    expect(parseInput("/permission ask", sender).kind).toBe("set_permission")
+    expect(parseInput("/permission x", sender).kind).toBe("unknown")
+    expect(parseInput("/usage", sender).kind).toBe("usage")
+  })
+
   it("formatHelp 包含所有命令", () => {
     const help = formatHelp()
     for (const cmd of SLASH_COMMANDS) {

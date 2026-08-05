@@ -12,6 +12,9 @@ export type ParsedInput =
   | { kind: "skill"; skillName: string; command: Command }
   | { kind: "set_model"; modelId: string; command: Command }
   | { kind: "list_models" }
+  | { kind: "compact"; command: Command }
+  | { kind: "set_permission"; command: Command; enabled: boolean }
+  | { kind: "usage" }
   | { kind: "help" }
   | { kind: "unknown"; name: string; detail: string }
   | { kind: "empty" }
@@ -30,6 +33,9 @@ export const SLASH_COMMANDS: readonly SlashCommandDef[] = [
   { name: "deny", description: "拒绝挂起的权限请求", usage: "/deny <requestId>" },
   { name: "skill", description: "激活技能(LLM 自动加载全文并执行)", usage: "/skill <name>" },
   { name: "model", description: "切换模型(无参列出可用模型)", usage: "/model [<id>]" },
+  { name: "compact", description: "手动压缩上下文", usage: "/compact" },
+  { name: "permission", description: "切换权限模式(auto/ask)", usage: "/permission <auto|ask>" },
+  { name: "usage", description: "查看用量与上下文占用", usage: "/usage" },
   { name: "help", description: "显示斜杠命令列表", usage: "/help" },
 ] as const
 
@@ -67,6 +73,15 @@ export function parseInput(raw: string, sender: Sender): ParsedInput {
       if (rest === "") return { kind: "list_models" }
       return { kind: "set_model", modelId: rest, command: { kind: "set_model", sender, model: rest } }
     }
+    case "compact":
+      return { kind: "compact", command: { kind: "compact", sender } }
+    case "permission": {
+      if (rest === "auto") return { kind: "set_permission", command: { kind: "set_auto_approve", sender, enabled: true }, enabled: true }
+      if (rest === "ask") return { kind: "set_permission", command: { kind: "set_auto_approve", sender, enabled: false }, enabled: false }
+      return { kind: "unknown", name, detail: "用法 /permission <auto|ask>" }
+    }
+    case "usage":
+      return { kind: "usage" }
     case "help":
       return { kind: "help" }
     default:

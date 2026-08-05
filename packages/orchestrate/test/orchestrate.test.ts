@@ -447,6 +447,39 @@ describe("orchestrate:setModel 运行时切模型", () => {
   })
 })
 
+describe("orchestrate:compactNow 手动压缩", () => {
+  it("配置 compact 策略 → compactNow 触发摘要化", async () => {
+    const store = createMemoryStore()
+    const session = createSession({ store, sessionId: "s1", cwd: "/tmp/tau-test", workspaceRoots: ["/tmp/tau-test"] })
+    const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
+    let summarized = false
+    const scheduler = createScheduler(
+      { llm: fakeLlm(() => ({ text: "ok", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop" as const, error: undefined, aborted: false })), session, action },
+      {
+        model: "fake",
+        maxTurns: 1,
+        compact: {
+          summarize: async () => {
+            summarized = true
+            return "摘要"
+          },
+        },
+      },
+    )
+    await scheduler.compactNow()
+    expect(summarized).toBe(true)
+  })
+
+  it("未配置 compact → compactNow 静默 no-op", async () => {
+    const store = createMemoryStore()
+    const session = createSession({ store, sessionId: "s1", cwd: "/tmp/tau-test", workspaceRoots: ["/tmp/tau-test"] })
+    const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
+    const scheduler = createScheduler({ llm: fakeLlm(() => ({ text: "ok", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop" as const, error: undefined, aborted: false })), session, action }, { model: "fake", maxTurns: 1 })
+    await scheduler.compactNow()
+    expect(store.events.replay("s1").some((e) => e.kind === "compression")).toBe(false)
+  })
+})
+
 describe("orchestrate:kernel 流抛错归一化", () => {
   it("stream throw(429 重试耗尽)→ 归一化为 error 结果,不向调用方抛整坨错误", async () => {
     const store = createMemoryStore()

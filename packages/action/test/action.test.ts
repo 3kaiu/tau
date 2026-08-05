@@ -105,6 +105,26 @@ describe("action 平面:read/bash/write + 门 + 审计", () => {
     expect(ok.ok).toBe(true)
   })
 
+  it("setAutoApprove 运行时切换权限模式", async () => {
+    const store = createMemoryStore()
+    const plane = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: false })
+    expect(plane.getAutoApprove()).toBe(false)
+
+    // 关闭 auto → ask:execute 挂起请求,需批准
+    const denied = plane.execute({ sessionId: "s", toolCallId: "c11", name: "bash", args: { command: "echo x" }, cwd: "/tmp/tau-test" })
+    await Promise.resolve()
+    expect(plane.permissionRequest().length).toBe(1)
+    plane.deny("c11")
+    const out = await denied
+    expect(out.ok).toBe(false)
+
+    // 开启 auto → 直接放行
+    plane.setAutoApprove(true)
+    expect(plane.getAutoApprove()).toBe(true)
+    const ok = await plane.execute({ sessionId: "s", toolCallId: "c12", name: "bash", args: { command: "echo y" }, cwd: "/tmp/tau-test" })
+    expect(ok.ok).toBe(true)
+  })
+
   it("危险命令:autoApprove 也不豁免(强制询问,deny 后 rejected)", async () => {
     const store2 = createMemoryStore()
     const auto = createActionPlane(store2, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })

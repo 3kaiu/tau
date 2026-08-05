@@ -21,6 +21,8 @@ export type FooterState = {
   maxContextTokens: number | null
   pendingCount: number
   activeGoals: number
+  /** 已发生的 turn 数(usage 事件累计)。 */
+  turn: number
 }
 
 export function emptyFooterState(): FooterState {
@@ -35,6 +37,7 @@ export function emptyFooterState(): FooterState {
     maxContextTokens: null,
     pendingCount: 0,
     activeGoals: 0,
+    turn: 0,
   }
 }
 
@@ -70,6 +73,7 @@ export class FooterComponent implements Component {
     switch (event.kind) {
       case "usage":
         this.state.cumulativeTokens = event.cumulativeTokens
+        this.state.turn = event.turn
         this.state.busy = false
         break
       case "budget_exceeded":

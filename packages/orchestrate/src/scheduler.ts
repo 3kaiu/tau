@@ -79,6 +79,8 @@ export interface Scheduler {
   }
   /** 运行时切换模型(覆盖启动 --model;缺省跟随投影 self.model)。 */
   setModel(model: string): void
+  /** 手动压缩上下文(无触发阈值检查,立即摘要化老消息)。未配置 compact 策略 → 静默 no-op。 */
+  compactNow(): Promise<void>
   busy(): boolean
 }
 
@@ -416,7 +418,7 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
 
   /** 投影历史体积估算(estimateTokens:CJK 加权);artifact 引用按 size 计入,不因外置而漏算。
    * 预算尺子与 session 对齐:effective = min(模型上下文窗, session maxContextTokens),超阈值 → 摘要化老消息。 */
-  async function maybeCompact(sessionIn: Session, strategy: CompactStrategy): Promise<void> {
+  async function maybeCompact(sessionIn: Session, strategy: CompactStrategy, force = false): Promise<void> {
     const projection = sessionIn.project()
     const history = projection.history
     const maxTokens = projection.self.model.contextWindow.maxTokens
@@ -433,7 +435,7 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
         ),
       0,
     )
-    if (estimatedTokens <= effectiveBudget * (strategy.thresholdRatio ?? 0.8)) return
+    if (!force && estimatedTokens <= effectiveBudget * (strategy.thresholdRatio ?? 0.8)) return
     const summaryText = await strategy.summarize({ sessionId: sessionIn.sessionId, messages: history, reason: "context-overflow" })
     sessionIn.compact("context-overflow", summaryText)
   }
@@ -517,6 +519,11 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
     },
     setModel(model: string) {
       activeModel = model
+    },
+    async compactNow() {
+      if (options.compact !== undefined) {
+        await maybeCompact(session, options.compact, true)
+      }
     },
     busy: () => running !== null,
   }

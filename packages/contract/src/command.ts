@@ -94,6 +94,21 @@ export const SetModelCommandSchema = z.object({
 })
 export type SetModelCommand = z.infer<typeof SetModelCommandSchema>
 
+/** compact = 手动压缩上下文(立即摘要化老消息)。无参数。 */
+export const CompactCommandSchema = z.object({
+  kind: z.literal("compact"),
+  sender: SenderSchema,
+})
+export type CompactCommand = z.infer<typeof CompactCommandSchema>
+
+/** set_auto_approve = 切换权限模式(auto 静默放行 / ask 询问)。 */
+export const SetAutoApproveCommandSchema = z.object({
+  kind: z.literal("set_auto_approve"),
+  sender: SenderSchema,
+  enabled: z.boolean(),
+})
+export type SetAutoApproveCommand = z.infer<typeof SetAutoApproveCommandSchema>
+
 /** Command 封闭联合:新增分支必须同时改本联合、Event 相关分支与 invariant 检查器(编译期穷尽)。 */
 export const CommandSchema = z.discriminatedUnion("kind", [
   PromptCommandSchema,
@@ -105,5 +120,7 @@ export const CommandSchema = z.discriminatedUnion("kind", [
   SelectCommandSchema,
   ObserveCommandSchema,
   SetModelCommandSchema,
+  CompactCommandSchema,
+  SetAutoApproveCommandSchema,
 ])
 export type Command = z.infer<typeof CommandSchema>

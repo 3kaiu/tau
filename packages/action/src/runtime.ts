@@ -150,6 +150,15 @@ export class ActionPlane {
     this.opts.onPermission = fn
   }
 
+  /** 运行时切换 autoApprove(权限模式:auto 静默放行 / 恢复 ask 询问)。 */
+  setAutoApprove(enable: boolean): void {
+    this.opts.autoApprove = enable
+  }
+
+  getAutoApprove(): boolean {
+    return this.opts.autoApprove === true
+  }
+
   /** 注册生命周期 hook。返回取消注册函数。 */
   registerHook(hook: Hook): () => void {
     return this.hooks.register(hook)

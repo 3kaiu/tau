@@ -44,6 +44,12 @@ export interface Tui {
 
 const DEFAULT_SENDER: Sender = { clientId: "tui", kind: "tui" }
 
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return String(n)
+}
+
 export function createTui(deps: TuiDeps): Tui {
   const sender = deps.sender ?? DEFAULT_SENDER
   const face = deps.face
@@ -215,12 +221,42 @@ export function createTui(deps: TuiDeps): Tui {
         focusEditor()
         return
       }
+      case "usage": {
+        const s = footer.getState()
+        const pct = s.maxContextTokens !== null && s.maxContextTokens > 0 ? `${Math.round((s.cumulativeTokens / s.maxContextTokens) * 100)}%` : "-"
+        const rows = [
+          `  turn            ${s.turn}`,
+          `  context         ${pct} (${formatTokens(s.cumulativeTokens)}/${s.maxContextTokens !== null ? formatTokens(s.maxContextTokens) : "?"})`,
+          `  model           ${s.model ?? "-"}`,
+          `  permission      ${s.mode ?? "ask"}`,
+          `  git             ${s.git?.branch ?? "-"}${s.git?.dirty ? " (dirty)" : ""}`,
+          "",
+          statusColor.dim(`/compact 可手动压缩上下文释放空间`),
+        ]
+        infoDialog.show("用量", rows, () => {
+          ui.hideOverlay()
+          focusEditor()
+        })
+        ui.showOverlay(infoDialog, { anchor: "center", width: "70%", maxHeight: 20 })
+        return
+      }
+      case "set_permission": {
+        editor.disableSubmit = true
+        const result = await face.publish(parsed.command)
+        editor.disableSubmit = false
+        editor.addToHistory?.(text)
+        footer.update({ mode: parsed.enabled ? "auto" : "ask" })
+        footer.setTransient(result.accepted ? result.detail : `切换失败: ${result.detail}`)
+        focusEditor()
+        return
+      }
       case "prompt":
       case "steer":
       case "abort":
       case "approve":
       case "deny":
-      case "skill": {
+      case "skill":
+      case "compact": {
         const cmdKind = parsed.command.kind
         editor.disableSubmit = true
         const result = await face.publish(parsed.command)

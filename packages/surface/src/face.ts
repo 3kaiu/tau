@@ -148,6 +148,14 @@ export function createCommandFace(deps: FaceDeps): CommandFace {
           deps.orchestrate.setModel(command.model)
           return { accepted: true, eventId: uuid(), detail: `已切换到 ${command.model}` }
         }
+        case "compact": {
+          await deps.orchestrate.compactNow()
+          return { accepted: true, eventId: uuid(), detail: "已手动压缩上下文" }
+        }
+        case "set_auto_approve": {
+          deps.action.setAutoApprove(command.enabled)
+          return { accepted: true, eventId: uuid(), detail: command.enabled ? "已切换为 auto(危险操作仍会询问)" : "已切换为 ask(每次询问)" }
+        }
       }
     },
     subscribe(
