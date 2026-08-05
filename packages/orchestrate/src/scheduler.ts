@@ -3,7 +3,7 @@
 // turn 是原子单位;任何中断是状态机输入;重试/打断/循环全可见可审计。
 
 import { createEventIdGenerator, estimateTokens, type ContextProjection, type Event, type Goal, type Message, type SenderKind, type WakeReason } from "@tau/contract"
-import { collectStream, type LlmEvent, type LlmKernel, type LlmCollectResult, type LlmRequest } from "@tau/llm"
+import { collectStream, errorCodeOf, errorMessage, type LlmEvent, type LlmKernel, type LlmCollectResult, type LlmRequest } from "@tau/llm"
 import type { Session } from "@tau/session"
 import type { ActionPlane } from "@tau/action"
 import { GoalJudge } from "./goals.ts"
@@ -132,32 +132,39 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
     deltaDirty = false
   }
 
-  /** 迭代 kernel 流,边收边发 text_delta 增量,返回与 complete() 同构的聚合结果。 */
+  /** 迭代 kernel 流,边收边发 text_delta 增量,返回与 complete() 同构的聚合结果。
+   * kernel.stream 抛错(如 429 重试耗尽)在这里归一化为 error 事件,不再向调用方 throw——
+   * 否则整坨 AI SDK 错误(堆栈/requestBody)会穿透调度器打在屏幕上。 */
   async function completeStreaming(sig: AbortSignal): Promise<LlmCollectResult> {
     const all: LlmEvent[] = []
-    for await (const event of deps.llm.stream(session.project(), llmRequest(), sig)) {
-      all.push(event)
-      switch (event.type) {
-        case "model-switched":
-          emitRaw({ kind: "model_switched", from: event.from, to: event.to, reason: "fallback" })
-          break
-        case "text-delta":
-          if (deltaDirty && deltaThinking) flushDelta()
-          deltaBuf += event.text
-          deltaThinking = false
-          deltaDirty = true
-          if (deltaBuf.length >= DELTA_FLUSH_CHARS) flushDelta()
-          break
-        case "thinking-delta":
-          if (deltaDirty && !deltaThinking) flushDelta()
-          deltaBuf += event.text
-          deltaThinking = true
-          deltaDirty = true
-          if (deltaBuf.length >= DELTA_FLUSH_CHARS) flushDelta()
-          break
-        default:
-          break
+    try {
+      for await (const event of deps.llm.stream(session.project(), llmRequest(), sig)) {
+        all.push(event)
+        switch (event.type) {
+          case "model-switched":
+            emitRaw({ kind: "model_switched", from: event.from, to: event.to, reason: "fallback" })
+            break
+          case "text-delta":
+            if (deltaDirty && deltaThinking) flushDelta()
+            deltaBuf += event.text
+            deltaThinking = false
+            deltaDirty = true
+            if (deltaBuf.length >= DELTA_FLUSH_CHARS) flushDelta()
+            break
+          case "thinking-delta":
+            if (deltaDirty && !deltaThinking) flushDelta()
+            deltaBuf += event.text
+            deltaThinking = true
+            deltaDirty = true
+            if (deltaBuf.length >= DELTA_FLUSH_CHARS) flushDelta()
+            break
+          default:
+            break
+        }
       }
+    } catch (err) {
+      const { code, retryable } = errorCodeOf(err)
+      all.push({ type: "error", code, message: errorMessage(err), retryable })
     }
     flushDelta()
     return collectStream(async function* () {
@@ -237,7 +244,16 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
         }
       }
 
-      if (result.usage) session.recordUsage(result.usage)
+      if (result.usage) {
+        session.recordUsage(result.usage)
+        const usageState = session.project().self.usage
+        emitRaw({
+          kind: "usage",
+          cumulativeTokens: usageState.cumulativeTokens,
+          turnTokens: (result.usage.promptTokens ?? 0) + (result.usage.completionTokens ?? 0),
+          turn: usageState.turn,
+        })
+      }
       text = result.text
       // 预算强制:无工具调用也会自然结束的 turn,若已超限同样在收尾前 abort
       if (budgetAborted(session.project())) {

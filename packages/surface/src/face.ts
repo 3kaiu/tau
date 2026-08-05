@@ -48,6 +48,7 @@ export const PUBLIC_EVENT_KINDS: readonly EventKind[] = [
   "recovery",
   "goal",
   "text_delta",
+  "usage",
 ]
 
 /** 事件过不过滤(纯函数,供订阅分发与 http/acp 复用)。 */

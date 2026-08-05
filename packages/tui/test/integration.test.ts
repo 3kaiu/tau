@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest"
 import { TranscriptView } from "../src/views/transcript.ts"
 import { ToolPanelView } from "../src/views/tool-panel.ts"
 import { PermissionPopup } from "../src/views/permission.ts"
+import { FooterComponent } from "../src/views/footer.ts"
 import type { Event, Message } from "@tau/contract"
 
 // ---------- 事件/消息构造器 ----------
@@ -540,3 +541,33 @@ function visibleWidthOf(s: string): number {
   for (const ch of s) n += /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE6F\uFF00-\uFF60\uFFE0-\uFFE6]/.test(ch) ? 2 : 1
   return n
 }
+
+describe("集成:底部状态栏(footer)", () => {
+  it("usage 事件累计 context 用量;budget 事件给出上下文百分比", () => {
+    const f = new FooterComponent()
+    f.update({ model: "deepseek-v4-flash-free", cwd: "/tmp" })
+
+    f.consume(ev({ kind: "usage", cumulativeTokens: 500, turnTokens: 300, turn: 1 }))
+    const lines1 = f.render(80)
+    expect(stripAnsi(lines1.join("\n"))).toContain("deepseek-v4-flash-free")
+    expect(stripAnsi(lines1.join("\n"))).toContain("500 tok")
+
+    // budget 事件给出上限 → context 百分比(cumulative 保持 500,上限 1000 → 50%)
+    f.consume(ev({ kind: "budget_exceeded", metric: "cumulativeTokens", used: 800, limit: 1000 }))
+    const lines2 = f.render(80)
+    expect(stripAnsi(lines2.join("\n"))).toContain("context: 50%")
+    expect(stripAnsi(lines2.join("\n"))).toContain("超限")
+  })
+
+  it("permission 事件累计 pending;busy 指示", () => {
+    const f = new FooterComponent()
+    f.consume(ev({ kind: "permission", requestId: "r1", toolName: "bash", summary: "ls", state: "requested" }))
+    expect(stripAnsi(f.render(80).join("\n"))).toContain("pending 1")
+
+    f.consume(ev({ kind: "permission", requestId: "r1", toolName: "bash", summary: "ls", state: "granted" }))
+    expect(stripAnsi(f.render(80).join("\n"))).not.toContain("pending")
+
+    f.setBusy(true)
+    expect(stripAnsi(f.render(80).join("\n"))).toContain("●")
+  })
+})

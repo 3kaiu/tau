@@ -124,6 +124,15 @@ export const TextDeltaEventSchema = EventBaseSchema.extend({
 })
 export type TextDeltaEvent = z.infer<typeof TextDeltaEventSchema>
 
+/** turn 用量落报:每次 llm 调用结束由调度器发出,供 TUI footer/观测消费(不携带敏感内容)。 */
+export const UsageEventSchema = EventBaseSchema.extend({
+  kind: z.literal("usage"),
+  cumulativeTokens: z.number().int().nonnegative(),
+  turnTokens: z.number().int().nonnegative(),
+  turn: z.number().int().nonnegative(),
+})
+export type UsageEvent = z.infer<typeof UsageEventSchema>
+
 /** Event 封闭联合:新增分支必须同时改本联合与 invariant 检查器(编译期穷尽)。 */
 export const EventSchema = z.discriminatedUnion("kind", [
   InputAcceptedEventSchema,
@@ -140,6 +149,7 @@ export const EventSchema = z.discriminatedUnion("kind", [
   RecoveryEventSchema,
   GoalEventSchema,
   TextDeltaEventSchema,
+  UsageEventSchema,
 ])
 export type Event = z.infer<typeof EventSchema>
 

@@ -389,10 +389,10 @@ function finishRuntime(prep: Prep, mcpEvents: readonly Event[]): TauRuntime {
   )
   bridges.scheduler = (event) => scheduler.notify(event)
 
-  // 调度器自产事件(recent 种类:retry/interrupted/model_switched + 流式增量 text_delta)→ 事件日志持久化。
+  // 调度器自产事件(recent 种类:retry/interrupted/model_switched + 流式增量 text_delta + 用量 usage)→ 事件日志持久化。
   // 只持久化 session 不自产的种类,防双写(compression/recovery 由 session 自持)。
   scheduler.subscribe((event) => {
-    if (event.kind === "retry" || event.kind === "interrupted" || event.kind === "model_switched" || event.kind === "text_delta") {
+    if (event.kind === "retry" || event.kind === "interrupted" || event.kind === "model_switched" || event.kind === "text_delta" || event.kind === "usage") {
       store.events.append(sessionId, event)
     }
   })

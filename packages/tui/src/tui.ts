@@ -5,15 +5,14 @@ import {
   TUI as PiTui,
   ProcessTerminal,
   Editor,
-  Text,
   Spacer,
   matchesKey,
 } from "@earendil-works/pi-tui"
 import type { CommandFace } from "@tau/surface"
 import type { Event, Sender } from "@tau/contract"
 import { editorTheme } from "./theme.ts"
-import { statusColor } from "./theme.ts"
 import { TranscriptView } from "./views/transcript.ts"
+import { FooterComponent } from "./views/footer.ts"
 import { PermissionPopup, type PermissionDecision } from "./views/permission.ts"
 import { parseInput, formatHelp } from "./prompt.ts"
 
@@ -46,13 +45,9 @@ export function createTui(deps: TuiDeps): Tui {
   const permissionPopup = new PermissionPopup()
 
   const editor = new Editor(ui, editorTheme, { paddingX: 1 })
-  const helpHint = new Text(statusColor.dim("  /help 查看命令 · Ctrl+C 打断/退出 · Enter 发送 · Ctrl+T 展开思考"), 0, 0)
-  // kimi-code 风格顶部状态:仅一行 Model + cwd(极简,不常驻预算/工具统计)
-  const modelLine = new Text(
-    statusColor.dim([deps.model ? `Model: ${deps.model}` : null, deps.cwd ? deps.cwd : null].filter(Boolean).join(" · ")),
-    0,
-    0,
-  )
+  // kimi-code 风格底部状态栏(双行:model/busy/goal + context 用量),贴编辑器下方
+  const footer = new FooterComponent()
+  footer.update({ model: deps.model ?? null, cwd: deps.cwd ?? null })
 
   let stopped = false
   let resolveStop: () => void
@@ -78,15 +73,16 @@ export function createTui(deps: TuiDeps): Tui {
 
   function adjustLayout(): void {
     const rows = terminal.rows
-    // 固定区 = 顶部状态行(1) + 空行(1) + 编辑器(1) + 提示(1)。
+    // 固定区 = 空行(1) + 编辑器(1) + footer 双行(2)。
     // transcript 占剩余;physical 行截断已由视图内部保证。
-    const fixedOverhead = 1 + 1 + 1 + 1
+    const fixedOverhead = 1 + 1 + 2
     transcript.setMaxRenderLines(Math.max(4, rows - fixedOverhead))
     ui.requestRender()
   }
 
   function handleEvent(event: Event): void {
     transcript.consume(event)
+    footer.consume(event)
 
     switch (event.kind) {
       case "permission":
@@ -105,6 +101,7 @@ export function createTui(deps: TuiDeps): Tui {
         break
     }
 
+    footer.setBusy(transcript.isStreaming())
     ensureSpinner()
     if (!transcript.isStreaming()) stopSpinner()
     adjustLayout()
@@ -139,7 +136,7 @@ export function createTui(deps: TuiDeps): Tui {
         ui.requestRender()
         return
       case "unknown":
-        transcript.setLines([statusColor.error(`未知命令: /${parsed.name} (${parsed.detail})`)])
+        footer.setTransient(`未知命令: /${parsed.name} (${parsed.detail})`)
         ui.requestRender()
         return
       case "prompt":
@@ -152,7 +149,7 @@ export function createTui(deps: TuiDeps): Tui {
         const result = await face.publish(parsed.command)
         editor.disableSubmit = false
         if (!result.accepted) {
-          transcript.setLines([statusColor.error(`命令未接受: ${result.detail}`)])
+          footer.setTransient(`命令未接受: ${result.detail}`)
           ui.requestRender()
         }
         ui.setFocus(editor)
@@ -184,12 +181,10 @@ export function createTui(deps: TuiDeps): Tui {
     return undefined
   })
 
-  ui.addChild(modelLine)
-  ui.addChild(new Spacer(1))
   ui.addChild(transcript)
-  ui.addChild(new Spacer(0))
+  ui.addChild(new Spacer(1))
   ui.addChild(editor)
-  ui.addChild(helpHint)
+  ui.addChild(footer)
 
   ui.setFocus(editor)
   adjustLayout()

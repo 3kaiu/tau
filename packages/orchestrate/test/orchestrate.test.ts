@@ -393,6 +393,63 @@ describe("orchestrate:prompt busy 守卫(P0-4)", () => {
   })
 })
 
+describe("orchestrate:usage 事件落报", () => {
+  it("llm 返回 usage → 发 usage 契约事件并持久化", async () => {
+    const store = createMemoryStore()
+    const session = createSession({ store, sessionId: "s1", cwd: "/tmp/tau-test", workspaceRoots: ["/tmp/tau-test"] })
+    const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
+    const llm: LlmKernel = {
+      stream: async function* () {
+        yield { type: "text-delta", text: "hi" }
+        yield { type: "finish", finishReason: "stop", usage: { promptTokens: 100, completionTokens: 200, totalTokens: 300 } }
+      },
+      complete: async () => ({ text: "hi", thinking: "", toolCalls: [], usage: { promptTokens: 100, completionTokens: 200, totalTokens: 300 }, finishReason: "stop", error: undefined, aborted: false }),
+      models: () => [], getModel: () => null,
+      features: () => ({ streaming: true, tools: true, thinking: false, vision: false }),
+      getAuth: () => null, cachePolicy: () => ({ mode: "off", ttlMs: 0 }), refresh: () => {},
+    }
+    const scheduler = createScheduler({ llm, session, action }, { model: "fake", maxTurns: 1 })
+    const events: Event[] = []
+    scheduler.subscribe((e) => events.push(e))
+    const result = await scheduler.prompt({ text: "hi", source: "prompt" })
+    expect(result.error).toBeNull()
+    const usageEvent = events.find((e) => e.kind === "usage")
+    expect(usageEvent).toBeDefined()
+    if (usageEvent !== undefined && usageEvent.kind === "usage") {
+      expect(usageEvent.cumulativeTokens).toBe(300)
+      expect(usageEvent.turnTokens).toBe(300)
+    }
+  })
+})
+
+describe("orchestrate:kernel 流抛错归一化", () => {
+  it("stream throw(429 重试耗尽)→ 归一化为 error 结果,不向调用方抛整坨错误", async () => {
+    const store = createMemoryStore()
+    const session = createSession({ store, sessionId: "s1", cwd: "/tmp/tau-test", workspaceRoots: ["/tmp/tau-test"] })
+    const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
+    const err = Object.assign(new Error("Failed after 3 attempts. Last error: AI_APICallError: Rate limit exceeded."), { statusCode: 429, isRetryable: true })
+    const llm: LlmKernel = {
+      stream: async function* () {
+        const fatal = err
+        if (fatal) throw fatal
+        yield { type: "text-delta", text: "never" }
+      },
+      complete: async () => {
+        throw err
+      },
+      models: () => [], getModel: () => null,
+      features: () => ({ streaming: true, tools: true, thinking: false, vision: false }),
+      getAuth: () => null, cachePolicy: () => ({ mode: "off", ttlMs: 0 }), refresh: () => {},
+    }
+    const scheduler = createScheduler({ llm, session, action }, { model: "fake", maxTurns: 5, maxRetries: 0 })
+    const result = await scheduler.prompt({ text: "hi", source: "prompt" })
+    // 不 throw:返回 error 结果,收口为文本回复
+    expect(result.error).toContain("Rate limit exceeded")
+    const transcripts = store.events.replay("s1").filter((e) => e.kind === "transcript")
+    expect(transcripts.some((e) => JSON.stringify((e as { message: Message }).message.content).includes("模型调用失败"))).toBe(true)
+  })
+})
+
 describe("orchestrate:model_switched 构造点", () => {
   it("kernel 流 model-switched → scheduler 发 model_switched 契约事件", async () => {
     const { store, session } = freshSession()

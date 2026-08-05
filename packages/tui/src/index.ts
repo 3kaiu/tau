@@ -12,6 +12,8 @@ export type { ParsedInput, SlashCommandDef } from "./prompt.ts"
 
 export { TranscriptView } from "./views/transcript.ts"
 export type { TranscriptOptions } from "./views/transcript.ts"
+export { FooterComponent, emptyFooterState } from "./views/footer.ts"
+export type { FooterState } from "./views/footer.ts"
 export { ToolPanelView } from "./views/tool-panel.ts"
 export { ResourcePanelView, emptyResourceState } from "./views/resource-panel.ts"
 export type { ResourceState } from "./views/resource-panel.ts"
