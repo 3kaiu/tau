@@ -16,13 +16,13 @@ export function createMemoryStore() {
   return new MemoryStore()
 }
 
-export function createSqliteStore(path: string) {
-  return new SqliteStore(path)
+export function createSqliteStore(path: string, options?: { readonly?: boolean }) {
+  return new SqliteStore(path, options)
 }
 
 /** path 仅 sqlite 用;缺省 ":memory:"(SQLite 内存库,与 MemoryStore 行为对齐但走真实 SQL)。 */
-export function createStore(driver: "sqlite" | "memory", path?: string): Store {
+export function createStore(driver: "sqlite" | "memory", path?: string, options?: { readonly?: boolean }): Store {
   if (driver === "memory") return new MemoryStore()
-  if (driver === "sqlite") return new SqliteStore(path ?? ":memory:")
+  if (driver === "sqlite") return new SqliteStore(path ?? ":memory:", options)
   throw new Error(`未知驱动:${driver}`)
 }

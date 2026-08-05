@@ -24,6 +24,8 @@
 | `src/views/` | transcript/tool 面板/资源面板 |
 | `src/print.ts` | 非交互模式(print/JSONL) |
 | `src/prompt.ts` | 输入绑定与斜杠命令 |
+| `src/theme.ts` | 主题(配色/风格) |
+| `src/index.ts` | 汇总导出 |
 
 ## 模块宪法要点
 - `views/`:只读投影驱动渲染,事件驱动增量刷新;批准弹窗渲染 permission(requested) 事件的**参数摘要**(命令全文/目标路径/理由),用户批准前看到"模型要跑什么";工具执行面板显示参数摘要(非全文,扫一眼即知模型在干嘛)

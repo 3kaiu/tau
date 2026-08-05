@@ -126,6 +126,25 @@ describe("消息落地与配对", () => {
     expect(store.events.replay("s1").filter((e) => e.kind === "transcript")).toHaveLength(1)
     expect(session.snapshot().transcriptCount).toBe(1)
   })
+
+  it("thinking 块超限截断 + 标记(缺省 32KB,可配)", () => {
+    const store = createStore("memory")
+    const session = createSession(makeOptions(store, { maxThinkingBytes: 50 }))
+    const big = MessageSchema.parse({
+      id: "t1",
+      role: "assistant",
+      content: [{ type: "thinking", text: "x".repeat(200) }],
+      createdAt: "t",
+    })
+    session.appendMessage(big)
+    const stored = store.messages.list("s1").messages[0]!
+    const block = stored.content.find((b) => b.type === "thinking")
+    expect(block?.type).toBe("thinking")
+    if (block?.type === "thinking") {
+      expect(block.text.length).toBeLessThanOrEqual(200)
+      expect(block.text).toContain("(thinking 超限截断")
+    }
+  })
 })
 
 describe("Goals / pendingSyscalls", () => {

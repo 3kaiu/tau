@@ -17,7 +17,7 @@ export type SchedulerDeps = {
 
 /** 上下文压缩策略(scheduler 触发,摘要源注入:enhance.summarize 或 LLM policy)。 */
 export type CompactStrategy = {
-  /** 触发阈值:投影历史估算 token 占模型上下文窗比例,超则压缩(缺省 0.7)。 */
+  /** 触发阈值:投影历史估算 token 占模型上下文窗比例,超则压缩(缺省 0.8,与契约 Config.compaction.triggerRatio 基线一致)。 */
   thresholdRatio?: number
   /** 摘要生成(经 session.compact 落为 summary 消息;message 为完整历史)。 */
   summarize: (input: { sessionId: string; messages: readonly Message[]; reason: string }) => string | Promise<string>
@@ -306,7 +306,7 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
       (n, m) => n + m.content.reduce((acc, b) => acc + (b.type === "text" ? b.text.length : b.type === "artifact" && b.size !== undefined ? b.size : 0), 0) / 4,
       0,
     )
-    if (estimatedTokens <= maxTokens * (strategy.thresholdRatio ?? 0.7)) return
+    if (estimatedTokens <= maxTokens * (strategy.thresholdRatio ?? 0.8)) return
     const summaryText = await strategy.summarize({ sessionId: sessionIn.sessionId, messages: history, reason: "context-overflow" })
     sessionIn.compact("context-overflow", summaryText)
   }

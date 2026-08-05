@@ -53,6 +53,10 @@ export type SessionOptions = Partial<ProjectorOptions> & {
   monotonic?: () => number
   /** text 块超此字节数 → 外置为 artifact 引用(正文存 store,历史仅引用;缺省 16KB)。 */
   artifactThresholdBytes?: number
+  /** 压缩交换保留尾部消息数(缺省 6;契约 Config.compaction.keepRecent 消费方)。 */
+  compactionKeepRecent?: number
+  /** thinking 块文本上限字节(超限截断 + 标记;缺省 32KB,与契约 ThinkingPolicySchema.maxBytes 一致)。 */
+  maxThinkingBytes?: number
 }
 
 /** 缺省投影配置:调用方只传关心的字段,其余走基线(自包含,不散落 ?? 判断)。 */
@@ -255,12 +259,17 @@ export function createSession(options: SessionOptions): Session {
         source: input.source,
         createdAt: clock().wall,
       }
+      // 回执事件与历史同规:大输入不进事件流(与 externalizeContent 同阈值;超限给引用预览,正文只存 store)
+      const receiptText =
+        input.text.length > artifactThreshold
+          ? `[大输入已外置 artifact(正文存 store,经 artifact:read 取回);前 200 字符:${input.text.slice(0, 200)}…]`
+          : input.text
       emit({
         id: uuid(),
         timestamp: clock().wall,
         redact: [],
         kind: "input_accepted",
-        command: { kind: "prompt", sender: { clientId: input.source, kind: "cli" }, text: input.text },
+        command: { kind: "prompt", sender: { clientId: input.source, kind: "cli" }, text: receiptText },
       })
       store.messages.append(sessionId, message)
       emit({ id: uuid(), timestamp: clock().wall, redact: [], kind: "transcript", message })
@@ -272,9 +281,16 @@ export function createSession(options: SessionOptions): Session {
     },
 
     appendMessage(message: Message): void {
+      // thinking 块体积上限:超限截断 + 标记(思路链保留头部,防单块撑爆历史)
+      const maxThinking = options.maxThinkingBytes ?? 32_000
+      const bounded = message.content.map((block) =>
+        block.type === "thinking" && block.text.length > maxThinking
+          ? { ...block, text: `${block.text.slice(0, maxThinking)}\n…(thinking 超限截断,剩余 ${block.text.length} 字符)` }
+          : block,
+      )
       // 大载荷外置:text 块超阈值 → artifact 引用(正文存 store,历史/投影/事件流只含引用)
       const artifactThreshold = options.artifactThresholdBytes ?? DEFAULT_ARTIFACT_THRESHOLD_BYTES
-      const content = externalizeContent(store, sessionId, message.content, artifactThreshold)
+      const content = externalizeContent(store, sessionId, bounded, artifactThreshold)
       const stored: Message = { ...message, content }
       store.messages.append(sessionId, stored)
       emit({ id: uuid(), timestamp: clock().wall, redact: [], kind: "transcript", message: stored })
@@ -429,7 +445,7 @@ export function createSession(options: SessionOptions): Session {
         store,
         sessionId,
         messages: store.messages.list(sessionId).messages,
-        keepRecent: 6,
+        keepRecent: options.compactionKeepRecent ?? 6,
         reason,
         summaryText,
         clockNow: () => clock().wall,

@@ -178,11 +178,11 @@ function getOptValue(args: string[], flag: string): string | undefined {
   return v !== undefined && !v.startsWith("-") ? v : undefined
 }
 
-/** 直接打开 store(治理/配置只读路径,不构造完整 runtime,避免副作用事件)。 */
+/** 直接打开 store(治理/配置只读路径,不构造完整 runtime,避免副作用事件;不拿写锁)。 */
 function openStore(storePath?: string): Store {
   if (storePath === undefined) return createMemoryStore()
   mkdirSync(dirname(storePath), { recursive: true })
-  return createStore("sqlite", storePath)
+  return createStore("sqlite", storePath, { readonly: true })
 }
 
 /** compose 的通用选项转发(含 --session)。 */

@@ -6,6 +6,7 @@ import type { Event, Message, SessionSnapshot } from "@tau/contract"
 import type { ArtifactMeta, ArtifactRecord, ArtifactTable, AuditEntry, AuditQuery, AuditTable, EventTable, KvEntry, KvTable, MessagePage, MessageTable, SessionTable, Store } from "./store.ts"
 import { extractSearchText, normalizeSearchQuery } from "./store.ts"
 import { migrate, type Db } from "./migrate.ts"
+import { StoreLock } from "./lock.ts"
 
 // ---------- 慢查询日志 ----------
 
@@ -364,11 +365,20 @@ class SqliteKvTable implements KvTable {
 
 // ---------- SqliteStore ----------
 
+/** 构造前先拿锁:失败即抛(不创建 Database),避免半初始化泄露。 */
+function acquireWithLock(path: string): StoreLock {
+  const lock = new StoreLock(path)
+  lock.acquire()
+  return lock
+}
+
 export type SqliteStoreOptions = {
   /** 执行耗时 ≥ 阈值(ms)的 SQL 输出日志;undefined = 关闭。 */
   slowQueryThresholdMs?: number
   /** 慢查询日志输出(缺省 console.warn)。 */
   slowQueryLogger?: (sql: string, ms: number) => void
+  /** 只读打开(治理/观测):不拿写锁。 */
+  readonly?: boolean
 }
 
 export class SqliteStore implements Store {
@@ -380,11 +390,14 @@ export class SqliteStore implements Store {
   readonly kv: SqliteKvTable
   readonly artifacts: SqliteArtifactTable
   private readonly db: Database
+  private readonly lock: StoreLock | null
   private readonly txFn: (fn: () => unknown) => unknown
   private readonly archiveAuditStmt: Statement
   private readonly countArchivedStmt: Statement
 
   constructor(path: string, options: SqliteStoreOptions = {}) {
+    // 单写者锁:文件型路径且非只读 → 独占(第二写者明确错误;`:memory:` 无跨进程竞争不拿锁)
+    this.lock = path !== ":memory:" && options.readonly !== true ? acquireWithLock(path) : null
     const raw = new Database(path)
     raw.exec("PRAGMA journal_mode = WAL")
     raw.exec("PRAGMA foreign_keys = ON")
@@ -420,6 +433,7 @@ export class SqliteStore implements Store {
 
   close(): void {
     this.db.close()
+    this.lock?.release()
   }
 
   /** 归档旧审计记录(移至 audit_archive,不删历史)。返回归档条数。 */

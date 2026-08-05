@@ -53,7 +53,7 @@ LLM 的手脚。唯一副作用出口:安全、可审计、可中断地执行 Sy
 | `src/audit.ts` | 审计日志(写入 + 查询) |
 | `src/workspace.ts` | 工作区模型(`WorkspaceIndex`)——**根列表 + 越界校验 + gitignore 忽略树全部落地**:目录 mtime = 子条目结构指纹,未变目录零 stat 复用、变化目录只重扫一层并递归检查,全量重扫仅冷启动;`resolveWithin` 统一越界判定(roots 空 = 不设界,roots 非空 = 严格拒绝),find/grep/ls 与 read/write/edit 同源不漂移;**gitignore 只读根 `.gitignore`(ignore 预编译匹配树)**,指纹 `{mtimeMs,size}` 失效——内容变更即使目录 mtime 未变也整根重扫(不牺牲新鲜度);删除目录剪除缓存键(无幽灵条目);`.tau-worktrees` 入 SKIP_DIRS(工作树不进模型检索视野) |
 | `src/worktree.ts` | 工作树(T2 内部件):`WORKTREE_DIR=".tau-worktrees"` 下 mkdir -p 创建/rmSync 清理/枚举;名称契约 `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`(非法名 rejected,防越界);orchestrate 子会话隔离归属的唯一出口(经 execute 审计) |
-| `src/tools/` | 内置工具:read/write/edit/bash/grep/find/ls/ask_user/retrieve/fetch/system/tool:catalog/result/artifact:read |
+| `src/tools/` | 内置工具 14 件模型面:read/write/edit/bash/grep/find/ls/ask_user/retrieve/fetch/system/tool:catalog/result/artifact:read + worktree 3 件 T2 内部(create/rm/list,见 worktree.ts) |
 | MCP 客户端 | **不在本包**(原 `src/mcp/` 空壳已清):第三方工具经 `registry` + `execute` 通道接入(宪法 9 无豁免),客户端实现在 app 拼装点 `app/src/mcp.ts`(工具名转义 + defaultRule 注入 + callTool 适配,见 app SPEC) |
 
 ## 模块宪法要点

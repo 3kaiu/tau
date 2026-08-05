@@ -25,6 +25,7 @@
 | 模块 | 职责 |
 |---|---|
 | `src/face.ts` | CommandFace 聚合(发布/订阅/快照) |
+| `src/print.ts` | print 模式渲染(非交互输出,`-p` 消费) |
 | `src/http.ts` | Hono HTTP + SSE 端点 |
 | `src/rpc.ts` | JSON-RPC over stdio/HTTP——**(延后)** |
 | `src/acp.ts` | ACP 协议适配(editor 驱动) |

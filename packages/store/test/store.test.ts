@@ -231,6 +231,27 @@ describe("store: sqlite 持久化(文件)", () => {
       store.close?.()
     }
   })
+
+  it("单写者锁:第二写者明确错误;close 后释放;崩溃残留接管", () => {
+    if (!isBun) return
+    const tmp = `/tmp/tau-store-lock-${Date.now()}.sqlite`
+    const first = createStore("sqlite", tmp)
+    expect(() => createStore("sqlite", tmp)).toThrow(/独占|持有/)
+    expect(() => createStore("sqlite", tmp, { readonly: true })).not.toThrow()
+    first.close?.()
+    const reopened = createStore("sqlite", tmp)
+    expect(reopened).toBeInstanceOf(SqliteStore)
+    reopened.close?.()
+    const store = createStore("sqlite", tmp)
+    store.close?.()
+    // 崩溃残留:锁文件含已死 pid → 接管成功
+    const { writeFileSync, rmSync } = require("node:fs") as typeof import("node:fs")
+    writeFileSync(`${tmp}.lock`, "99999999")
+    const store2 = createStore("sqlite", tmp)
+    expect(store2).toBeInstanceOf(SqliteStore)
+    store2.close?.()
+    rmSync(`${tmp}.lock`, { force: true })
+  })
 })
 
 describe("store: audit 归档(保留策略)", () => {

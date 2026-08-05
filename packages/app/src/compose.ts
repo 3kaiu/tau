@@ -300,6 +300,7 @@ function finishRuntime(prep: Prep, mcpEvents: readonly Event[]): TauRuntime {
     ...(sessionModel !== undefined ? { model: sessionModel } : {}),
     ...(config?.maxContextTokens !== undefined ? { maxContextTokens: config.maxContextTokens } : {}),
     ...(config?.toolTierRules !== undefined ? { toolTierRules: config.toolTierRules } : {}),
+    ...(config?.compaction !== undefined ? { compactionKeepRecent: config.compaction.keepRecent } : {}),
     onEvent: (event) => schedulerBridge?.(event),
   })
 
@@ -314,7 +315,14 @@ function finishRuntime(prep: Prep, mcpEvents: readonly Event[]): TauRuntime {
     { llm: kernel, session, action },
     {
       ...(modelId !== "default" ? { model: modelId } : {}),
-      ...(enhancer !== null ? { compact: { summarize: (i) => enhancer.summarize(i.sessionId, i.messages, i.reason) } } : {}),
+      ...(enhancer !== null
+        ? {
+            compact: {
+              summarize: (i) => enhancer.summarize(i.sessionId, i.messages, i.reason),
+              ...(config?.compaction !== undefined ? { thresholdRatio: config.compaction.triggerRatio } : {}),
+            },
+          }
+        : {}),
       ...schedulerOptions,
     },
   )

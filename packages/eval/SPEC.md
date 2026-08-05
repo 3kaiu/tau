@@ -42,9 +42,9 @@
 |---|---|
 | `src/eval.ts` | 套件运行器(并行 + 汇总) |
 | `src/faux.ts` | FauxLlm 脚本化 LLM |
-| `src/asserts/` | 行为断言集(每文件一断言) |
+| `src/asserts.ts` | 行为断言集(单文件,id 1..N,契约级) |
 | `src/report.ts` | 结果报告(runs.jsonl + 摘要) |
-| `src/fixtures/` | 会话夹具(合成事件流) |
+| `src/fixtures.ts` | 会话夹具(合成事件流 + FauxLlm 场景) |
 
 ## 模块宪法要点
 - `faux.ts`:回复序列用声明式脚本(JSON),不带随机性;虚拟时钟与错误注入脚本化,同夹具可复现

@@ -67,6 +67,19 @@ active → completed | failed | cancelled
 - `retention`: `high`(用户指令/Goal,压缩时永不先丢)> `normal`(模型输出)> `low`(工具输出,先丢)。
 - `modelId`:溯源"谁说的",换模型后历史可见。
 - toolCalls/toolResults 按 `callId` 一一配对(`checkToolPairing` 强制),顺序稳定。
+- content 块:`text`(正文,超阈值自动外置为 artifact 引用)/ `image`(引用+元数据)/ `thinking`(模型思路链,默认进历史,超限截断+标记)/ `artifact`(大载荷引用,正文存 store)。
+- 压缩交换:全文移入归档区仍可 retrieve,摘要进历史;摘要只重述已发生事实,不臆造新结论。
+
+## ApprovalState 状态机
+
+- 状态:`active`(挂起询问)→ `approved` / `denied` / `expired`(超时)/ `revoked`(会话 abort 清理残留挂起)。
+- 挂起经 `pendingSyscalls` 进投影与 UI(questionId/工具/发起时刻);`approve` 经 requestId 定位、`deny` 与 denied 一一对应。
+- 作用域预授权(`grantScope`)一次批准 N 次/限时,不豁免危险命令。
+- 孤儿挂起有归宿:abort 后残留 pending → revoked;审批链可审计(permission 事件 granted/denied/timeout 序列)。
+
+## DangerousCommandPatterns
+
+契约级危险命令模式清单(`rm -rf /`、`git push --force`、`sudo`、`curl | sh` 等):action 的 bash 检测与 eval 断言共用同一清单——危险命令强制询问,不随 autoApprove 静默放行。
 
 ## 不变量检查器(eval 断言配套)
 

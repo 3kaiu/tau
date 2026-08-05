@@ -1,5 +1,5 @@
 // @tau/store — memory.ts:内存实现(测试/评测/内存会话用,同接口)。
-// 与 sqlite 行为逐项对齐(差分测试兜底在 eval);单写者语义以所有权抛错表达。
+// 与 sqlite 行为逐项对齐(差分测试兜底在 eval);单写者锁由 sqlite 文件驱动承担(跨进程),memory 驱动为进程内实例无跨进程竞争。
 
 import type { Event, Message, SessionSnapshot } from "@tau/contract"
 import type { ArtifactMeta, ArtifactRecord, ArtifactTable, AuditEntry, AuditQuery, AuditTable, EventTable, KvEntry, KvTable, MessagePage, MessageTable, SessionTable, Store } from "./store.ts"

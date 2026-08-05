@@ -4,7 +4,7 @@
 会话数据的唯一持久化层。sqlite 与 memory 双实现,接口一致,可热切换。session/action/audit 全部读写经此。
 
 ## 功能(公开 API 面)
-- `createStore(driver: "sqlite" | "memory", path?)` -> `Store`(sqlite 需 path,memory 忽略)
+- `createStore(driver: "sqlite" | "memory", path?)` -> `Store`(sqlite 需 path,缺省回退 ":memory:" 与 memory 行为对齐;memory 忽略 path)
 - `createMemoryStore()` / `createSqliteStore(path)` -> `Store`
 - `store.sessions` / `store.messages` / `store.events` / `store.audit` / `store.kv`
 - 事务:`store.tx(cb)`(批量原子写)
@@ -19,8 +19,8 @@
 3. **接口不泄漏实现**:sqlite/memory 切换对上层零感知
 4. **schema 即契约**:表结构变更走迁移,不破坏旧数据
 5. **读不锁写**:WAL 模式,长读不影响写
-6. **单写者模型**:同一会话同一时刻只有一个进程可写(surface serve / CLI 互斥:锁文件 + 会话所有权);第二写者收到明确错误而非数据竞争
-7. **保留策略**:会话归档(完成会话经 **session 层 API** `session.archive()` 置 archived 状态——API 归属 session,store 提供 archived 状态列与归档查询)、审计滚动窗口(`archiveAudit` 移至 `audit_archive` 表,不删历史)、artifact 配额(M6 随 artifacts 模块定案)--事件表/审计表/artifact 正文三条增长线都有去处,不无限膨胀
+6. **单写者模型**:同一会话同一时刻只有一个进程可写(surface serve / CLI 互斥:**锁文件 `<db>.lock`(写 pid)+ 会话所有权**,文件型 sqlite 打开即独占,pid 存活时第二写者收到明确错误而非数据竞争;pid 已死(崩溃残留)接管重拿;`:memory:` 与只读打开(治理/观测)不拿锁;只读路径不构造 runtime 不写事件,无竞争面)
+7. **保留策略**:会话归档(完成会话经 **session 层 API** `session.archive()` 置 archived 状态——API 归属 session,store 提供 archived 状态列与归档查询)、审计滚动窗口(`archiveAudit` 移至 `audit_archive` 表,不删历史)、artifact 配额(规划,未实现——正文增长由手动 purge 约束)--事件表/审计表/artifact 正文三条增长线都有去处,不无限膨胀
 
 ## 内部模块
 | 模块 | 职责 |
@@ -44,7 +44,7 @@
 - 索引齐全:消息按 (session, seq) 索引、事件按 (session, seq) 索引、审计按 (session, timestamp) 索引、会话注册表按 (updated_at DESC, session_id) 索引
 - 预处理语句缓存:每条 SQL 构造期 prepare 一次,运行期复用
 - 慢查询可观测:SQL 日志按阈值输出,不静默吞性能问题
-- FTS5 全文索引:session 检索/记忆检索/历史检索共享(M5+ 随 retrieve 升级)
+- FTS5 全文索引:历史检索已落地(messages_fts);会话/记忆检索暂走线性过滤(规划升级,未实现)
 
 ## 多语言
 - SQLite schema 文档化(建表 SQL 即规范),任何语言可直读数据文件
