@@ -9,7 +9,7 @@ import {
   matchesKey,
 } from "@earendil-works/pi-tui"
 import type { CommandFace } from "@tau/surface"
-import type { Event, Sender } from "@tau/contract"
+import type { Event, GitStatus, Sender } from "@tau/contract"
 import { editorTheme } from "./theme.ts"
 import { TranscriptView } from "./views/transcript.ts"
 import { FooterComponent } from "./views/footer.ts"
@@ -21,8 +21,14 @@ export type TuiDeps = {
   sender?: Sender
   /** 模型显示名(可选)。 */
   model?: string
+  /** thinking effort(可选,如 "high";显示为 `model thinking: high`)。 */
+  thinkingEffort?: string
   /** cwd 显示(可选)。 */
   cwd?: string
+  /** permission 模式(可选,如 "auto"/"ask")。 */
+  permissionMode?: string
+  /** git 状态(可选,footer git 徽标)。 */
+  git?: GitStatus | null
 }
 
 export interface Tui {
@@ -45,9 +51,15 @@ export function createTui(deps: TuiDeps): Tui {
   const permissionPopup = new PermissionPopup()
 
   const editor = new Editor(ui, editorTheme, { paddingX: 1 })
-  // kimi-code 风格底部状态栏(双行:model/busy/goal + context 用量),贴编辑器下方
+  // kimi-code 风格底部状态栏(双行:mode/goal/model/pending/cwd/git + context 用量),贴编辑器下方
   const footer = new FooterComponent()
-  footer.update({ model: deps.model ?? null, cwd: deps.cwd ?? null })
+  footer.update({
+    model: deps.model ?? null,
+    thinkingEffort: deps.thinkingEffort ?? null,
+    cwd: deps.cwd ?? null,
+    mode: deps.permissionMode ?? null,
+    git: deps.git ?? null,
+  })
 
   let stopped = false
   let resolveStop: () => void

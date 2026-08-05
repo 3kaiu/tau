@@ -1,16 +1,21 @@
-// @tau/tui - views/footer.ts:底部状态栏(参考 kimi-code FooterComponent)。
-// 双行:Line1 = 模型 + busy 点 + goal/pending 徽标 + 右侧 tips;
+// @tau/tui - views/footer.ts:底部状态栏(还原 kimi-code FooterComponent)。
+// 双行:Line1 = slots 拼接(mode/goal/model/tasks/cwd/git)+ 右侧 tips(10s 轮换);
 //       Line2 = 左侧 transient 提示 + 右侧 context 用量。
-// 只读事件驱动:usage/budget/goal/permission 事件累计进状态,不直读 store。
+// 只读事件驱动:usage/budget/goal/permission 事件累计进状态;git/mode 由外部注入,不直读内核。
 
 import type { Component } from "@earendil-works/pi-tui"
-import type { Event } from "@tau/contract"
+import type { Event, GitStatus } from "@tau/contract"
 import { statusColor } from "../theme.ts"
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui"
 
 export type FooterState = {
   model: string | null
+  /** thinking effort 后缀(如 "high"/"off");null 不显示。 */
+  thinkingEffort: string | null
   cwd: string | null
+  /** permission 模式:auto/ask/yolo 等;null 不显示。 */
+  mode: string | null
+  git: GitStatus | null
   busy: boolean
   cumulativeTokens: number
   maxContextTokens: number | null
@@ -21,7 +26,10 @@ export type FooterState = {
 export function emptyFooterState(): FooterState {
   return {
     model: null,
+    thinkingEffort: null,
     cwd: null,
+    mode: null,
+    git: null,
     busy: false,
     cumulativeTokens: 0,
     maxContextTokens: null,
@@ -29,6 +37,21 @@ export function emptyFooterState(): FooterState {
     activeGoals: 0,
   }
 }
+
+/** Line1 slot 顺序(参考 kimi DEFAULT_STATUS_LINE_ITEMS)。 */
+const STATUS_LINE_ITEMS = ["busy", "mode", "goal", "model", "pending", "cwd", "git"] as const
+
+/** tips 轮换(参考 kimi ROTATION):短提示成对展示,宽终端两两组合。 */
+const TIPS: { text: string; solo?: boolean }[] = [
+  { text: "/help 查看命令" },
+  { text: "Ctrl+T 展开思考" },
+  { text: "Ctrl+C 打断/退出" },
+  { text: "/abort 终止当前 turn", solo: true },
+  { text: "/steer <text> 补充指令" },
+  { text: "/skill <name> 加载技能" },
+]
+const TIP_ROTATE_MS = 10_000
+const TIP_SEPARATOR = " | "
 
 export class FooterComponent implements Component {
   private state: FooterState = emptyFooterState()
@@ -96,12 +119,13 @@ export class FooterComponent implements Component {
     if (this.cachedLines !== null && this.cachedWidth === width) return this.cachedLines
     this.cachedWidth = width
 
-    // ── Line1:模型 + busy + goal/pending + 右侧 tips ──
+    // ── Line1:slots 拼接 + 右侧 tips ──
+    const slots = this.buildSlots()
     const left: string[] = []
-    if (this.state.model) left.push(statusColor.accent(this.state.model))
-    if (this.state.busy) left.push(statusColor.dim("●"))
-    if (this.state.activeGoals > 0) left.push(statusColor.accent(`[goal ${this.state.activeGoals}]`))
-    if (this.state.pendingCount > 0) left.push(statusColor.warn(`[pending ${this.state.pendingCount}]`))
+    for (const slot of STATUS_LINE_ITEMS) {
+      const pieces = slots[slot]
+      if (pieces !== undefined) left.push(...pieces)
+    }
     const leftLine = left.join("  ")
 
     const tip = this.tipForWidth(width, leftLine)
@@ -130,10 +154,39 @@ export class FooterComponent implements Component {
     return this.cachedLines
   }
 
+  /** 各 slot 的可见片段;空内容返回空数组(跳过)。 */
+  private buildSlots(): Record<string, string[]> {
+    const s = this.state
+    const slots: Record<string, string[]> = {}
+
+    if (s.busy) slots.busy = [statusColor.dim("●")]
+
+    if (s.mode !== null) slots.mode = [statusColor.warn(s.mode)]
+
+    if (s.activeGoals > 0) {
+      slots.goal = [statusColor.accent(`[goal ${s.activeGoals}]`)]
+    }
+
+    if (s.model !== null) {
+      const suffix = s.thinkingEffort !== null && s.thinkingEffort !== "off" ? ` thinking: ${s.thinkingEffort}` : ""
+      slots.model = [statusColor.accent(`${s.model}${suffix}`)]
+    }
+
+    if (s.pendingCount > 0) slots.pending = [statusColor.warn(`[pending ${s.pendingCount}]`)]
+
+    if (s.cwd !== null) slots.cwd = [statusColor.dim(shortenCwd(s.cwd))]
+
+    if (s.git !== null) slots.git = [formatGitBadge(s.git)]
+
+    return slots
+  }
+
   private tipForWidth(width: number, leftLine: string): string | null {
-    const tip = "Ctrl+T 展开思考 · Ctrl+C 打断/退出"
-    if (visibleWidth(leftLine) + visibleWidth(tip) + 2 > width) return null
-    return statusColor.dim(tip)
+    const { primary, pair } = tipsForIndex()
+    const best = pair ?? primary
+    if (best === "") return null
+    if (visibleWidth(leftLine) + visibleWidth(best) + 2 > width) return null
+    return statusColor.dim(best)
   }
 
   private formatContext(): string {
@@ -145,6 +198,34 @@ export class FooterComponent implements Component {
     if (n > 0) return `context: ${formatTokens(n)} tok`
     return ""
   }
+}
+
+/** tips 轮换:10s 一换;当前/下一条非 solo 且不同 → 成对。 */
+function tipsForIndex(): { primary: string; pair: string | null } {
+  const n = TIPS.length
+  if (n === 0) return { primary: "", pair: null }
+  const index = Math.floor(Date.now() / TIP_ROTATE_MS)
+  const offset = ((index % n) + n) % n
+  const current = TIPS[offset]!
+  if (n === 1 || current.solo === true) return { primary: current.text, pair: null }
+  const next = TIPS[(offset + 1) % n]!
+  if (next.solo === true || next.text === current.text) return { primary: current.text, pair: null }
+  return { primary: current.text, pair: current.text + TIP_SEPARATOR + next.text }
+}
+
+function formatGitBadge(git: GitStatus): string {
+  const branch = git.branch ?? "?"
+  const dirty = git.dirty ? statusColor.warn("●") : ""
+  return `${statusColor.dim("git:")} ${statusColor.dim(branch)}${dirty}`
+}
+
+function shortenCwd(cwd: string): string {
+  const parts = cwd.split("/").filter((p) => p !== "")
+  const max = 3
+  if (parts.length <= max) return cwd
+  const head = parts.slice(0, 2).join("/")
+  const tail = parts.slice(-1).join("/")
+  return `…/${tail} (${head}/…)`
 }
 
 function formatTokens(n: number): string {

@@ -18,6 +18,7 @@ import {
   type ScheduleEntry,
 } from "@tau/orchestrate"
 import { CommandSchema, ConfigSchema, EventSchema, coerceConfigValue, formatConfigError, goal as makeGoal, isConfigKey, type Message, type SessionSnapshot } from "@tau/contract"
+import { gitInfo } from "./git.ts"
 
 const KNOWN_CONFIG_KEYS = ["model", "maxContextTokens", "turnBudget", "toolTierRules", "capabilityDefaults", "compaction", "thinking"].join(", ")
 import { version } from "./index.ts"
@@ -276,12 +277,8 @@ async function tuiMode(args: string[]): Promise<number> {
 
   const runtime = await composeAsync(composeOpts(opts))
 
-  // 远程目录增强(失败静默回退静态目录)
-  await applyRemoteCatalog(runtime.llm, {
-    onResult: (ok, count) => {
-      if (ok) console.error(`tau:已合并远程模型目录(+${count - runtime.llm.models().length} 新模型)`)
-    },
-  })
+  // 远程目录增强(失败静默回退静态目录)。TUI 模式静默:log 会污染原生的终端画面。
+  await applyRemoteCatalog(runtime.llm)
 
   const sender = { clientId: "tui", kind: "tui" as const }
   const tui = createTui({
@@ -289,6 +286,8 @@ async function tuiMode(args: string[]): Promise<number> {
     sender,
     ...(opts.model !== undefined ? { model: opts.model } : {}),
     cwd: opts.workspace,
+    ...(opts.autoApprove ? { permissionMode: "auto" } : {}),
+    git: gitInfo(opts.workspace)?.git ?? null,
   })
 
   // 接入权限回调:TUI 弹窗 -> 用户决策 -> action 继续

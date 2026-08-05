@@ -570,4 +570,19 @@ describe("集成:底部状态栏(footer)", () => {
     f.setBusy(true)
     expect(stripAnsi(f.render(80).join("\n"))).toContain("●")
   })
+
+  it("注入 git/mode/thinking effort → footer 显示", () => {
+    const f = new FooterComponent()
+    f.update({
+      model: "deepseek-v4-flash-free",
+      thinkingEffort: "high",
+      cwd: "/a/b/c/d",
+      mode: "auto",
+      git: { branch: "main", commit: "abc123", dirty: true },
+    })
+    const out = stripAnsi(f.render(120).join("\n"))
+    expect(out).toContain("auto")
+    expect(out).toContain("deepseek-v4-flash-free thinking: high")
+    expect(out).toContain("git: main")
+  })
 })
