@@ -7,14 +7,15 @@ import {
   Editor,
   Spacer,
   matchesKey,
+  CombinedAutocompleteProvider,
 } from "@earendil-works/pi-tui"
 import type { CommandFace } from "@tau/surface"
-import type { Event, GitStatus, Sender } from "@tau/contract"
+import type { Event, GitStatus, Model, Sender } from "@tau/contract"
 import { editorTheme, statusColor } from "./theme.ts"
 import { TranscriptView } from "./views/transcript.ts"
 import { FooterComponent } from "./views/footer.ts"
 import { PermissionPopup, type PermissionDecision } from "./views/permission.ts"
-import { parseInput, formatHelp } from "./prompt.ts"
+import { parseInput, formatHelp, SLASH_COMMANDS } from "./prompt.ts"
 
 export type TuiDeps = {
   face: CommandFace
@@ -29,6 +30,8 @@ export type TuiDeps = {
   permissionMode?: string
   /** git 状态(可选,footer git 徽标)。 */
   git?: GitStatus | null
+  /** 模型目录(可选,/model 无参时列出)。 */
+  models?: readonly Model[]
 }
 
 export interface Tui {
@@ -58,6 +61,20 @@ export function createTui(deps: TuiDeps): Tui {
     ui.requestRender()
   }
   editor.borderColor = (s) => statusColor.dim(s)
+  // 斜杠命令自动补全 + 文件路径补全(pi-tui CombinedAutocompleteProvider)。
+  // `/help` 等命令名与参数(文件路径)都补全,对齐 kimi 输入体验。
+  editor.setAutocompleteProvider?.(
+    new CombinedAutocompleteProvider(
+      SLASH_COMMANDS.map((cmd) => ({
+        name: cmd.name,
+        aliases: cmd.aliases,
+        description: cmd.description,
+        argumentHint: cmd.usage,
+      })),
+      deps.cwd ?? process.cwd(),
+    ),
+  )
+  editor.setAutocompleteMaxVisible?.(6)
   // 欢迎态(对齐 kimi welcome):首屏提示,不是交互元素。
   transcript.setLines([
     statusColor.accent(`● 欢迎使用 tau ${deps.model ? `· ${deps.model}` : ""}`),
@@ -164,6 +181,31 @@ export function createTui(deps: TuiDeps): Tui {
         footer.setTransient(`未知命令: /${parsed.name} (${parsed.detail})`)
         ui.requestRender()
         return
+      case "list_models": {
+        const models = deps.models ?? []
+        const ids = models.slice(0, 40).map((m) => m.id).join("  ")
+        transcript.setLines([
+          statusColor.accent(`可用模型(${models.length} 个):`),
+          statusColor.dim(ids.length > 0 ? ids : "(目录为空)"),
+          statusColor.dim(`用 /model <id> 切换`),
+        ])
+        ui.requestRender()
+        return
+      }
+      case "set_model": {
+        editor.disableSubmit = true
+        const result = await face.publish(parsed.command)
+        editor.disableSubmit = false
+        editor.addToHistory?.(text)
+        if (!result.accepted) {
+          footer.setTransient(`模型切换失败: ${result.detail}`)
+        } else {
+          footer.update({ model: parsed.modelId })
+          footer.setTransient(`已切换到 ${parsed.modelId}`)
+        }
+        focusEditor()
+        return
+      }
       case "prompt":
       case "steer":
       case "abort":
@@ -173,6 +215,8 @@ export function createTui(deps: TuiDeps): Tui {
         editor.disableSubmit = true
         const result = await face.publish(parsed.command)
         editor.disableSubmit = false
+        // 提交成功 → 入历史(↑/↓ 回顾);失败也入历史(便于重试修正)
+        editor.addToHistory?.(text)
         if (!result.accepted) {
           footer.setTransient(`命令未接受: ${result.detail}`)
           ui.requestRender()

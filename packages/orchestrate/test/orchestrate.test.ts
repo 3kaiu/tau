@@ -422,6 +422,31 @@ describe("orchestrate:usage 事件落报", () => {
   })
 })
 
+describe("orchestrate:setModel 运行时切模型", () => {
+  it("启动固定 model 可被 setModel 覆盖(llm 收到新 model)", async () => {
+    const store = createMemoryStore()
+    const session = createSession({ store, sessionId: "s1", cwd: "/tmp/tau-test", workspaceRoots: ["/tmp/tau-test"] })
+    const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
+    const seen: string[] = []
+    const llm: LlmKernel = {
+      stream: async function* (_p, req?: LlmRequest) {
+        seen.push(req?.model ?? "none")
+        yield { type: "text-delta", text: "hi" }
+        yield { type: "finish", finishReason: "stop", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } }
+      },
+      complete: async () => ({ text: "hi", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop", error: undefined, aborted: false }),
+      models: () => [], getModel: () => null,
+      features: () => ({ streaming: true, tools: true, thinking: false, vision: false }),
+      getAuth: () => null, cachePolicy: () => ({ mode: "off", ttlMs: 0 }), refresh: () => {},
+    }
+    const scheduler = createScheduler({ llm, session, action }, { model: "start-model", maxTurns: 1 })
+    await scheduler.prompt({ text: "hi", source: "prompt" })
+    scheduler.setModel("switched-model")
+    await scheduler.prompt({ text: "hi", source: "prompt" })
+    expect(seen).toEqual(["start-model", "switched-model"])
+  })
+})
+
 describe("orchestrate:kernel 流抛错归一化", () => {
   it("stream throw(429 重试耗尽)→ 归一化为 error 结果,不向调用方抛整坨错误", async () => {
     const store = createMemoryStore()

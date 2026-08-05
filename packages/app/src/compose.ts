@@ -446,7 +446,16 @@ function finishRuntime(prep: Prep, mcpEvents: readonly Event[]): TauRuntime {
     bridges.face?.(ev)
   }
 
-  const face = createCommandFace({ orchestrate: scheduler, session, action })
+  const face = createCommandFace({
+    orchestrate: scheduler,
+    session,
+    action,
+    // set_model 解析:模型目录查询(静态 + 远程合并后)
+    resolveModel: (id) => {
+      const found = kernel.models().find((m) => m.id === id)
+      return found ?? null
+    },
+  })
   bridges.face = (event) => face.notify(event)
 
   return { store, session, llm: kernel, action, scheduler, face, enhancer, mcpDispose: async () => mcpRuntime.dispose?.() }

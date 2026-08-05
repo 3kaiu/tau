@@ -84,6 +84,16 @@ describe("prompt:parseInput", () => {
     expect(r.kind).toBe("unknown")
   })
 
+  it("/model <id> -> set_model;无参 -> list_models", () => {
+    const withId = parseInput("/model deepseek-v4-flash-free", sender)
+    expect(withId.kind).toBe("set_model")
+    if (withId.kind === "set_model") {
+      expect(withId.modelId).toBe("deepseek-v4-flash-free")
+      expect(withId.command).toMatchObject({ kind: "set_model", model: "deepseek-v4-flash-free" })
+    }
+    expect(parseInput("/model", sender).kind).toBe("list_models")
+  })
+
   it("formatHelp 包含所有命令", () => {
     const help = formatHelp()
     for (const cmd of SLASH_COMMANDS) {

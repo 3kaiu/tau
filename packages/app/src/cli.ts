@@ -288,6 +288,7 @@ async function tuiMode(args: string[]): Promise<number> {
     cwd: opts.workspace,
     ...(opts.autoApprove ? { permissionMode: "auto" } : {}),
     git: gitInfo(opts.workspace)?.git ?? null,
+    models: runtime.llm.models(),
   })
 
   // 接入权限回调:TUI 弹窗 -> 用户决策 -> action 继续

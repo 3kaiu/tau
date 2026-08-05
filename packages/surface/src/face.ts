@@ -1,7 +1,7 @@
 // @tau/surface - face.ts:CommandFace 聚合(发布/订阅/快照)。
 // 命令面无状态:一切状态在 session;只发布与观察,不生成内容。
 
-import { createEventIdGenerator, type Command, type Event, type InputAcceptedEvent, type SessionSnapshot } from "@tau/contract"
+import { createEventIdGenerator, type Command, type Event, type InputAcceptedEvent, type Model, type SessionSnapshot } from "@tau/contract"
 import type { Scheduler } from "@tau/orchestrate"
 import type { Session } from "@tau/session"
 import type { ActionPlane } from "@tau/action"
@@ -16,6 +16,8 @@ export type FaceDeps = {
   orchestrate: Scheduler
   session: Session
   action: ActionPlane
+  /** 模型目录查询(id → Model),供 set_model 解析与校验;缺省拒绝变更。 */
+  resolveModel?: (id: string) => Model | null
   onEvent?: (event: Event) => void
 }
 
@@ -136,6 +138,15 @@ export function createCommandFace(deps: FaceDeps): CommandFace {
         }
         case "observe": {
           return { accepted: true, eventId: uuid(), detail: "观察模式(public 可见面,需 includeSensitive 才见工具明细)" }
+        }
+        case "set_model": {
+          const model = deps.resolveModel?.(command.model) ?? null
+          if (model === null) {
+            return { accepted: false, eventId: uuid(), detail: `模型 "${command.model}" 不在目录` }
+          }
+          deps.session.setModel(model)
+          deps.orchestrate.setModel(command.model)
+          return { accepted: true, eventId: uuid(), detail: `已切换到 ${command.model}` }
         }
       }
     },

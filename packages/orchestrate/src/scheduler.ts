@@ -77,11 +77,15 @@ export interface Scheduler {
     set(goal: Goal): void
     active(): Goal | null
   }
+  /** 运行时切换模型(覆盖启动 --model;缺省跟随投影 self.model)。 */
+  setModel(model: string): void
   busy(): boolean
 }
 
 export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions = {}): Scheduler {
   const { session, action } = deps
+  // 运行时模型:启动 --model 固定覆盖;setModel 可再切换;缺省 undefined = 跟随投影 self.model
+  let activeModel: string | undefined = options.model
   const maxTurns = options.maxTurns ?? 6
   const maxTurnMs = options.maxTurnMs ?? 120_000
   const maxToolCallsPerTurn = options.maxToolCallsPerTurn ?? 24
@@ -109,7 +113,7 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
 
   function llmRequest(): LlmRequest {
     return {
-      ...(options.model !== undefined ? { model: options.model } : {}),
+      ...(activeModel !== undefined ? { model: activeModel } : {}),
       // model_switched 构造点:kernel 降级链事件 → 契约事件(经 emit 全量可见/落库)
       onEvent: (event) => {
         if (event.type === "model-switched") {
@@ -354,7 +358,7 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
       toolResults: [],
       interrupted,
       source: "model",
-      modelId: options.model,
+      modelId: activeModel,
       retention: "normal",
       createdAt: clock(),
     }
@@ -510,6 +514,9 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
     goals: {
       set: (goal: Goal) => session.setGoal(goal),
       active: () => session.snapshot().activeGoals.find((g) => g.status === "active") ?? null,
+    },
+    setModel(model: string) {
+      activeModel = model
     },
     busy: () => running !== null,
   }

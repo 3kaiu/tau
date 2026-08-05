@@ -86,6 +86,14 @@ export const ObserveCommandSchema = z.object({
 })
 export type ObserveCommand = z.infer<typeof ObserveCommandSchema>
 
+/** set_model = 运行时切换会话模型。model 是目录内的 id(不存在则由消费方拒绝)。 */
+export const SetModelCommandSchema = z.object({
+  kind: z.literal("set_model"),
+  sender: SenderSchema,
+  model: z.string(),
+})
+export type SetModelCommand = z.infer<typeof SetModelCommandSchema>
+
 /** Command 封闭联合:新增分支必须同时改本联合、Event 相关分支与 invariant 检查器(编译期穷尽)。 */
 export const CommandSchema = z.discriminatedUnion("kind", [
   PromptCommandSchema,
@@ -96,5 +104,6 @@ export const CommandSchema = z.discriminatedUnion("kind", [
   AbortCommandSchema,
   SelectCommandSchema,
   ObserveCommandSchema,
+  SetModelCommandSchema,
 ])
 export type Command = z.infer<typeof CommandSchema>

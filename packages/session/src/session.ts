@@ -117,6 +117,8 @@ export interface Session {
   promote(text: string, source: string): Message
   steer(text: string, source: string): Message
   setGoal(goal: Goal): void
+  /** 运行时切换会话模型(投影 self.model 随之更新;下一轮 llm 调用生效)。 */
+  setModel(model: Model): void
   pendSyscall(ask: { questionId?: string; toolCallId: string; toolName: string; summary: string }): PendingSyscall
   resolvePending(questionId: string, approved: boolean): void
   recordUsage(usage: { promptTokens: number; completionTokens: number; totalTokens: number; cacheReadTokens?: number }): void
@@ -339,6 +341,11 @@ export function createSession(options: SessionOptions): Session {
       if (existing >= 0) goals[existing] = goal
       else goals.push(goal)
       saveGoals(store, sessionId, goals)
+      touch()
+    },
+
+    setModel(model: Model): void {
+      projectionOptions.model = model
       touch()
     },
 

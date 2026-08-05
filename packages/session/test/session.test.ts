@@ -157,6 +157,23 @@ describe("Goals / pendingSyscalls", () => {
     expect(p.system.some((b) => b.kind === "goal" && b.content.includes("读 package.json"))).toBe(true)
   })
 
+  it("setModel 切换投影 self.model,下一轮生效", () => {
+    const store = createStore("memory")
+    const session = createSession(makeOptions(store))
+    const before = session.project().self.model.id
+    session.setModel(ModelSchema.parse({
+      id: "other-model",
+      name: "other",
+      provider: { api: "openai", provider: "openai" },
+      capabilities: { supportsTools: true },
+      cost: { inputPerMillion: 0, outputPerMillion: 0 },
+      contextWindow: { maxTokens: 128_000 },
+    }))
+    const after = session.project().self.model.id
+    expect(before).not.toBe(after)
+    expect(after).toBe("other-model")
+  })
+
   it("pendSyscall 广播 + 投影可见;resolvePending 清除", () => {
     const store = createStore("memory")
     const session = createSession(makeOptions(store))
