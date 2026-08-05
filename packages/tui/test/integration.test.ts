@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest"
 import { TranscriptView } from "../src/views/transcript.ts"
 import { ToolPanelView } from "../src/views/tool-panel.ts"
 import { PermissionPopup } from "../src/views/permission.ts"
+import { InfoDialog } from "../src/views/info-dialog.ts"
 import { FooterComponent } from "../src/views/footer.ts"
 import type { Event, Message } from "@tau/contract"
 
@@ -252,21 +253,27 @@ describe("集成:Event 流驱动 transcript + tool-panel", () => {
     expect(completedLines.length).toBe(2)
   })
 
-  it("跨视图事件过滤:transcript 忽略 tool 事件,tool-panel 忽略 transcript 事件", () => {
+  it("跨视图事件过滤:transcript 消费 tool(进行中可见),tool-panel 消费 tool 但忽略 transcript", () => {
     const tc = new TranscriptView()
     const tp = new ToolPanelView()
 
-    // tool 事件 -> transcript 不增长,tool-panel 增长
+    // tool 事件 -> transcript 显示进行中/结果行,tool-panel 也增长
     tc.consume(toolStarted("c1", "read", { path: "a" }))
     tp.consume(toolStarted("c1", "read", { path: "a" }))
-    expect(tc.render(80)).toEqual([])
+    expect(tc.isStreaming()).toBe(true)
+    expect(tc.render(80).some((l) => l.includes("read"))).toBe(true)
     expect(tp.render(80).length).toBeGreaterThanOrEqual(1)
+
+    // 工具完成 -> transcript 更新为 ✓,且不再 busy
+    tc.consume(toolCompleted("c1", "read", "content-a"))
+    expect(tc.isStreaming()).toBe(false)
+    expect(tc.render(80).some((l) => l.includes("✓"))).toBe(true)
 
     // transcript 事件 -> transcript 增长,tool-panel 不变
     const tpBefore = tp.render(80)
     tc.consume(transcript(userMsg("hello")))
     tp.consume(transcript(userMsg("hello")))
-    expect(tc.render(80).length).toBe(1)
+    expect(tc.render(80).some((l) => l.includes("hello"))).toBe(true)
     expect(tp.render(80)).toBe(tpBefore)
   })
 
@@ -585,5 +592,42 @@ describe("集成:底部状态栏(footer)", () => {
     expect(out).toContain("auto")
     expect(out).toContain("deepseek-v4-flash-free thinking: high")
     expect(out).toContain("git: main")
+  })
+
+  it("工具结果折叠:toggleTool 展开/收起长结果", () => {
+    const tc = new TranscriptView()
+    const longOut = "第一行\n" + "x".repeat(200)
+    tc.consume(toolStarted("c1", "bash", { command: "ls" }))
+    tc.consume(toolCompleted("c1", "bash", longOut))
+
+    // 折叠:首行预览 + 展开提示,不含第二行
+    const collapsed = tc.render(80)
+    const collapsedText = stripAnsi(collapsed.join("\n"))
+    expect(collapsedText).toContain("✓ bash")
+    expect(collapsedText).toContain("第一行")
+    expect(collapsedText).toContain("ctrl+o 展开")
+    expect(collapsedText).not.toContain("x".repeat(200))
+
+    // 展开:全文可见(经 wrap 分行)
+    tc.toggleTool()
+    const expanded = tc.render(80)
+    expect(stripAnsi(expanded.join("\n"))).toContain("x".repeat(40))
+  })
+
+  it("信息弹窗:show/dismiss,任意键关闭,宽度一致", () => {
+    const d = new InfoDialog()
+    expect(d.isActive()).toBe(false)
+    d.show("斜杠命令", ["  /help 帮助", "  /abort 打断"], () => {})
+    expect(d.isActive()).toBe(true)
+
+    const lines = d.render(50)
+    // 边框 + 内容行严格同宽;最后一行是框外提示(任意键关闭),不参与比较
+    const boxLines = lines.slice(0, lines.length - 1)
+    const widths = boxLines.map((l) => visibleWidthOf(stripAnsi(l)))
+    const first = widths[0]!
+    for (const w of widths) expect(w).toBe(first)
+
+    d.handleInput("x")
+    expect(d.isActive()).toBe(false)
   })
 })

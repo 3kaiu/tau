@@ -27,11 +27,12 @@ export type TranscriptOptions = {
   maxLines?: number
 }
 
-/** 已提交行:普通文本行 / markdown 块(assistant 正文,md 渲染) / thinking 块(可折叠)。 */
+/** 已提交行:普通文本行 / markdown 块(assistant 正文,md 渲染) / thinking 块(可折叠) / 工具行(进行中/完成)。 */
 type Entry =
   | { kind: "text"; text: string }
   | { kind: "md"; text: string }
   | { kind: "thinking"; msgId: string; text: string; expanded: boolean }
+  | { kind: "tool"; toolCallId: string; name: string; args: string; state: "running" | "done" | "failed"; resultBrief: string | null; expanded: boolean }
 
 /** 用户前缀(单调颜色,截断换行时续行不重复前缀)。 */
 function formatPrefix(msg: Message): string {
@@ -149,6 +150,8 @@ export class TranscriptView implements Component {
   private textBuf = ""
   private spinnerIdx = 0
   private streamDirty = false
+  /** 正在运行的工具数(tool started 未 completed):busy 判定的第二来源。 */
+  private runningTools = 0
 
   constructor(opts: TranscriptOptions = {}) {
     this.maxLines = opts.maxLines ?? 500
@@ -160,16 +163,16 @@ export class TranscriptView implements Component {
     this.cachedLines = null
   }
 
-  /** spinner 帧推进(TUI 的 setInterval 驱动),仅在有进行中流时重算。 */
+  /** spinner 帧推进(TUI 的 setInterval 驱动),有流或运行中工具时重算。 */
   tick(): void {
-    if (!this.streaming) return
+    if (!this.streaming && this.runningTools === 0) return
     this.spinnerIdx++
     this.streamDirty = true
   }
 
-  /** 是否有进行中的流(供 busy 指示)。 */
+  /** 是否有进行中的流或工具(供 busy 指示)。 */
   isStreaming(): boolean {
-    return this.streaming
+    return this.streaming || this.runningTools > 0
   }
 
   /**
@@ -193,6 +196,29 @@ export class TranscriptView implements Component {
           e.expanded = true
           break
         }
+      }
+    }
+    this.cachedLines = null
+  }
+
+  /**
+   * 切换工具结果折叠:从最新往前展开下一个有长结果的工具;全部展开则全部收起。
+   * 参考 kimi ctrl+o(与 thinking 折叠同语序)。无长结果工具 → 无效。
+   */
+  toggleTool(): void {
+    const toolIdx: number[] = []
+    for (let i = this.entries.length - 1; i >= 0; i--) {
+      const e = this.entries[i]
+      if (e?.kind === "tool" && e.resultBrief !== null && e.resultBrief !== "" && e.resultBrief.length > 80) toolIdx.push(i)
+    }
+    if (toolIdx.length === 0) return
+    const allExpanded = toolIdx.every((i) => (this.entries[i] as Extract<Entry, { kind: "tool" }>).expanded)
+    for (const i of toolIdx) {
+      const e = this.entries[i] as Extract<Entry, { kind: "tool" }>
+      if (allExpanded) e.expanded = false
+      else if (!e.expanded) {
+        e.expanded = true
+        break
       }
     }
     this.cachedLines = null
@@ -230,6 +256,37 @@ export class TranscriptView implements Component {
       case "model_switched":
         this.appendEntries([{ kind: "text", text: statusColor.accent(`(model: ${event.from} -> ${event.to})`) }])
         break
+      case "tool": {
+        const existing = this.entries.find((e) => e.kind === "tool" && e.toolCallId === event.toolCallId)
+        if (existing?.kind === "tool") {
+          // 更新已有工具行状态(started → completed/failed),在渲染时用状态渲染
+          if (event.state === "started") {
+            existing.state = "running"
+            existing.args = briefArgs(event.name, event.args ?? {})
+          } else if (event.state === "completed" && event.result) {
+            existing.state = "done"
+            existing.resultBrief = (event.result.stdout ?? "").slice(0, 2000)
+            existing.expanded = false
+            this.runningTools = Math.max(0, this.runningTools - 1)
+          } else if (event.state === "failed") {
+            existing.state = "failed"
+            existing.resultBrief = event.error ? `[${event.error.code}] ${event.error.message}` : "failed"
+            existing.expanded = false
+            this.runningTools = Math.max(0, this.runningTools - 1)
+          }
+          if (existing.state === "running") {
+            this.streaming = true
+            this.streamDirty = true
+          }
+        } else if (event.state === "started") {
+          // 新工具启动:先挂进行中行(等待完成由 started→completed 更新)
+          this.appendEntries([{ kind: "tool", toolCallId: event.toolCallId, name: event.name, args: briefArgs(event.name, event.args ?? {}), state: "running", resultBrief: null, expanded: false }])
+          this.runningTools += 1
+          this.streamDirty = true
+        }
+        this.cachedLines = null
+        break
+      }
       case "compression":
         this.appendEntries([{ kind: "text", text: statusColor.dim(`(compacted ${event.droppedIds.length} msgs)`) }])
         break
@@ -293,8 +350,32 @@ export class TranscriptView implements Component {
     return lines
   }
 
-  /** 单条 Entry → 可见物理行(thinking 折叠/markdown 渲染在此分叉)。 */
+  /** 单条 Entry → 可见物理行(thinking 折叠/markdown 渲染/工具状态在此分叉)。 */
   private entryLines(e: Entry, width: number): string[] {
+    if (e.kind === "tool") {
+      const icon = e.state === "running"
+        ? statusColor.accent(SPINNER[this.spinnerIdx % SPINNER.length]!)
+        : e.state === "done"
+          ? statusColor.ok("✓")
+          : statusColor.error("✗")
+      const name = statusColor.accent(e.name)
+      const arg = e.args !== "" ? statusColor.dim(` ${e.args}`) : ""
+      const head = `${MESSAGE_INDENT}${icon} ${name}${arg}`
+      const lines = wrapLine(head, width).split("\n")
+      if (e.resultBrief !== null && e.resultBrief !== "") {
+        if (e.expanded || e.resultBrief.length <= 80) {
+          for (const rl of e.resultBrief.split("\n")) {
+            lines.push(...wrapLine(`${MESSAGE_INDENT}${statusColor.dim(`↳ ${rl}`)}`, width).split("\n"))
+          }
+        } else {
+          const firstLine = e.resultBrief.split("\n")[0] ?? ""
+          const preview = truncateToWidth(firstLine, Math.max(10, width - 10), "…")
+          lines.push(`${MESSAGE_INDENT}${statusColor.dim(`↳ ${preview}`)}`)
+          lines.push(statusColor.dim(`  (${e.resultBrief.length} chars, ctrl+o 展开)`))
+        }
+      }
+      return lines
+    }
     if (e.kind === "text") return wrapLine(e.text, width).split("\n")
     if (e.kind === "md") {
       // assistant 正文:pi-tui Markdown 整段渲染(标题/代码块/列表/粗体)。

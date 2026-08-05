@@ -15,6 +15,7 @@ import { editorTheme, statusColor } from "./theme.ts"
 import { TranscriptView } from "./views/transcript.ts"
 import { FooterComponent } from "./views/footer.ts"
 import { PermissionPopup, type PermissionDecision } from "./views/permission.ts"
+import { InfoDialog } from "./views/info-dialog.ts"
 import { parseInput, formatHelp, SLASH_COMMANDS } from "./prompt.ts"
 
 export type TuiDeps = {
@@ -52,6 +53,7 @@ export function createTui(deps: TuiDeps): Tui {
 
   const transcript = new TranscriptView({ maxLines: 1000 })
   const permissionPopup = new PermissionPopup()
+  const infoDialog = new InfoDialog()
 
   const editor = new Editor(ui, editorTheme, { paddingX: 1 })
   // 聚焦高亮:pi-tui borderColor 是实例字段,聚焦时提亮边框(失焦回 dim)。
@@ -174,8 +176,12 @@ export function createTui(deps: TuiDeps): Tui {
       case "empty":
         return
       case "help":
-        transcript.setLines(formatHelp().split("\n"))
-        ui.requestRender()
+        // 帮助弹窗(overlay),不破坏对话历史
+        infoDialog.show("斜杠命令", formatHelp().split("\n"), () => {
+          ui.hideOverlay()
+          focusEditor()
+        })
+        ui.showOverlay(infoDialog, { anchor: "center", width: "80%", maxHeight: 30 })
         return
       case "unknown":
         footer.setTransient(`未知命令: /${parsed.name} (${parsed.detail})`)
@@ -183,13 +189,16 @@ export function createTui(deps: TuiDeps): Tui {
         return
       case "list_models": {
         const models = deps.models ?? []
-        const ids = models.slice(0, 40).map((m) => m.id).join("  ")
-        transcript.setLines([
-          statusColor.accent(`可用模型(${models.length} 个):`),
-          statusColor.dim(ids.length > 0 ? ids : "(目录为空)"),
+        const rows = [
+          `可用模型(${models.length} 个):`,
+          ...models.slice(0, 40).map((m) => `  ${statusColor.accent(m.id)}${m.name !== m.id ? statusColor.dim(`  ${m.name}`) : ""}`),
           statusColor.dim(`用 /model <id> 切换`),
-        ])
-        ui.requestRender()
+        ]
+        infoDialog.show("模型目录", rows, () => {
+          ui.hideOverlay()
+          focusEditor()
+        })
+        ui.showOverlay(infoDialog, { anchor: "center", width: "80%", maxHeight: 30 })
         return
       }
       case "set_model": {
@@ -211,7 +220,8 @@ export function createTui(deps: TuiDeps): Tui {
       case "abort":
       case "approve":
       case "deny":
-      case "skill":
+      case "skill": {
+        const cmdKind = parsed.command.kind
         editor.disableSubmit = true
         const result = await face.publish(parsed.command)
         editor.disableSubmit = false
@@ -219,10 +229,15 @@ export function createTui(deps: TuiDeps): Tui {
         editor.addToHistory?.(text)
         if (!result.accepted) {
           footer.setTransient(`命令未接受: ${result.detail}`)
-          ui.requestRender()
+        } else if (cmdKind === "steer") {
+          footer.setTransient("已排队补充指令")
+        } else if (cmdKind === "abort") {
+          footer.setTransient("已请求中断")
         }
+        ui.requestRender()
         focusEditor()
         return
+      }
     }
   }
 
@@ -230,21 +245,46 @@ export function createTui(deps: TuiDeps): Tui {
     void submit(text)
   }
 
+  let ctrlCArmed = false
   ui.addInputListener((data) => {
     if (matchesKey(data, "ctrl+t")) {
       transcript.toggleThinking()
       ui.requestRender()
       return { consume: true }
     }
+    if (matchesKey(data, "ctrl+o")) {
+      transcript.toggleTool()
+      ui.requestRender()
+      return { consume: true }
+    }
     if (matchesKey(data, "ctrl+c")) {
+      if (infoDialog.isActive()) {
+        infoDialog.dismiss()
+        ui.hideOverlay()
+        focusEditor()
+        return { consume: true }
+      }
       if (permissionPopup.isActive()) {
         return { consume: true }
       }
+      // 有进行中活动(LLM 流式或工具执行)→ 首次 Ctrl+C = 打断 turn
       if (transcript.isStreaming()) {
+        footer.setTransient("已请求中断…再次 Ctrl+C 立即停止")
         void face.publish({ kind: "abort", sender })
         return { consume: true }
       }
-      stop()
+      // 空闲时:双击 Ctrl+C 才退出(避免误触关闭,参考 kimi)
+      if (ctrlCArmed) {
+        stop()
+        return { consume: true }
+      }
+      ctrlCArmed = true
+      footer.setTransient("再按一次 Ctrl+C 退出")
+      ui.requestRender()
+      setTimeout(() => {
+        ctrlCArmed = false
+        ui.requestRender()
+      }, 2000)
       return { consume: true }
     }
     return undefined
@@ -272,6 +312,7 @@ export function createTui(deps: TuiDeps): Tui {
     process.stdout.off("resize", onResize)
     unsubscribe()
     permissionPopup.dismiss()
+    infoDialog.dismiss()
     ui.stop()
     resolveStop()
   }
