@@ -17,7 +17,7 @@
 - **wake 产出**:每次唤醒(steer/answer/goal 续跑/cron/retry/resume)附 `wake.reason + source`,模型永远知道"为什么现在醒"
 - **重试可见**:重试发 `retry` 事件(次数/原因)进投影最近活动——自动行为不隐藏
 - **turn 预算**:`turnBudget{ maxTurns, maxTurnMs, maxToolCallsPerTurn }` 进投影 self.resources;超限 → `budget_exceeded` 事件 + 告警(防"成功但原地踏步"的失控循环)
-- **恢复悬置告知**:crash 恢复发 `recovery` 事件 + 投影告警("上次 turn 未提交,副作用可能已落盘且无法回滚——先检查文件再继续")
+- **恢复悬置告知**:crash 恢复发 `recovery` 事件 + 投影告警("上次 turn 未提交,以下 syscall 已执行但 turn 未收尾,副作用可能已落盘且无法回滚——**告警带清单**,先检查文件再继续");提交点 = turn 尾部 `commitTurn(turnId)`,无悬置不误报
 
 ## 宪法
 1. **不生成上下文**:委托 `session.project()`;调度器永远不直接拼 prompt
@@ -33,18 +33,18 @@
 | `src/scheduler.ts` | turn 状态机(唯一时钟) |
 | `src/queues.ts` | steer/follow-up 队列(prompt 语义:立即/完成后/空闲后)——实现在 `scheduler.ts`(steerEpoch 入队 + turn 尾部 drain) |
 | `src/goals.ts` | Goal 判定(每 turn 后:完成/继续/阻塞/超限) |
-| `src/subagent.ts` | 子会话生命周期(fork/join/abort/观察)——简化实现在 `multirun.ts`(子会话隔离 + join 摘要接入) |
+| `src/subagent.ts` | 子会话生命周期(fork/join/background/观察):能力面白名单递减、limiter 并发上限、嵌套深度上限、注册表落 store.kv、独立 worktree |
 | `src/multirun.ts` | Multi-run 编排(spawn N 子会话 + worktree)与 Fusion 汇总 |
 | `src/cron.ts` | 定时唤醒(cron 判定 + 调度表持久化) |
-| `src/lifecycle.ts` | abort/retry/故障转移/恢复——**(规划)** 未实现;loop 指纹在 `scheduler.ts`,recovery 事件在 session 恢复路径产出 |
+| `src/lifecycle.ts` | turn 生命周期:行为指纹 `LoopGuard`(loop_detected 落点)+ `turnIdOf`(turn 提交锚生成);提交点调用在 `scheduler.ts`,recovery 事件与悬置判定在 session 恢复路径产出 |
 
 ## 模块宪法要点
 - `scheduler.ts`:turn 边界是唯一提交点(promote 后重算 continuation);执行 turn 预算(maxTurns/maxTurnMs/maxToolCallsPerTurn),超限中断 + 告警
 - `queues.ts`:steer 优先于 follow-up;同批 steer 只重置一次 allowance
 - `goals.ts`:goal 经 `session.setGoal()` 进投影(模型感知),判定独立于模型(启发式 + 可选 judge),数据流单向向下;**goal_continue 唤醒计入 turnBudget.maxTurns(goal 循环不豁免预算)**:预算超限即停,与 goal 判定无冲突——goal 未完成但预算耗尽 = 发 budget_exceeded,模型被告知"未达标但预算止"
-- `subagent.ts`:capability 递减继承,结果必须可 join 回父会话上下文;join 体积:子会话大结果经压缩/retrieve 式接入,不整包注入
+- `subagent.ts`:capability 递减继承(白名单缺省只读集,白名单外 execute 拒绝且 **recordAudit 落审计**,递减不留白);结果必须可 join 回父会话上下文;join 体积:子会话大结果经截断/retrieve 式接入,不整包注入(截断上限 resultPreviewChars 缺省 4000,完整产出留子会话);limiter 全局 maxConcurrent=4 + 每父会话 maxPerParent=8(进程内,`subagentUsage` 可观测);嵌套深度 maxDepth=10 沿注册表(parentId 链)上溯;子会话独立 durable(store.sessions)+ 独立审计;独立 worktree 经 action 创建/清理(finally 必清,失败退回父 cwd);context 以数据块 admit(非指令);background 立即返回 running,完成落注册表(无推送);子代理工具转发走 `bypassQueue`(父 T0 写队列被 subagent:run 占用时的死锁逃逸;子代理独立工作树 + 单调度器串行调用,并发安全)
 - `multirun.ts`:manifest 声明模型集/工作区/预算,各 run 独立 durable、独立审计;fusion 汇总经 session 输入通道(依赖单向向下),冲突标注后交模型裁决;worktree 由 action 创建与清理,失败清理不残留;**fusion 产出的新会话 manifest 继承主 run 的模型/能力,工作区 = 主工作区(非任一子 run 的 worktree)**
-- `lifecycle.ts`:**(规划,未实现)** 同"失败指纹"扩展为**行为指纹**(同工具同参数无论成败 N 次)→ `loop_detected` + 投影告警;steer 中断粒度:缺省"当前工具执行完 + 本 turn 结束",可配"立即断流"(已完成的工具结果提交,未完成部分带 interrupted);重试带 `retry` 事件;crash 恢复发 `recovery` 事件 + **副作用悬置判定**(从审计日志判定上次 turn 已提交/未提交的 syscall 清单,告警带清单,模型据此检查文件而非瞎猜)
+- `lifecycle.ts`:行为指纹 `LoopGuard`(同工具同参数无论成败累计次数,超阈值 → `loop_detected` + 投影告警,实现在 `lifecycle.ts`,scheduler 调用);steer 中断粒度:缺省"当前工具执行完 + 本 turn 结束"(`steer(input)` 不带中断信号,行为不变),可配"立即断流"(`steer(input, { interrupt: "immediate" })`:中止在飞 turn——llm 调用与工具执行共享 AbortSignal,在飞 bash 被终止(cancelled),剩余调用不执行,已完成的工具结果提交落盘,`interrupted` 事件 + `aborted` 返回;挂起询问未决即中止不挂等);重试带 `retry` 事件(scheduler);crash 恢复发 `recovery` 事件 + **副作用悬置判定**(审计带 turnId,提交锚 = turn 尾部 `session.commitTurn(turnId)`;恢复路径按"审计最新 turn 晚于已提交锚点"判定未提交 syscall 清单,`recovery` 事件 detail 与投影告警带清单——判定实现在 session 恢复路径,模型据此检查文件而非瞎猜)
 - `cron.ts`/`queues.ts`:唤醒时产出 `wake.reason`(cron/steer/goal_continue/answer);steer 进历史带 `user_steer` 标记(模型区分"新指令"与"打断插话")
 - `cron.ts`:判定全为纯函数(离线可断言);**`lastRunAt` 是幂等锚点**——`isDue` 从"上次运行(或创建)之后的下一个命中"起算,同一命中不会因重复调用 `run` 而重复触发;`dom` 与 `dow` 同时受限时取"或"(标准 cron 语义);非法表达式返回 `null` 交调用方给可操作报错,不静默当成"永不触发"
 - `scheduler.ts` 压缩闭环:turn 尾部(tool 循环后、下一轮 complete 前)检查投影历史体积(字符/4 ≈ token),超模型 contextWindow × thresholdRatio(缺省 0.7)时经注入的 `compact.summarize` 生成摘要,`session.compact("context-overflow", ...)` 落 summary 消息;摘要策略经构造期注入(enhance.summarize / LLM policy),scheduler 不 import enhance;**用户输入(admit,retention high)永不丢**,low/normal 先丢,最近 keepRecent 条兜底

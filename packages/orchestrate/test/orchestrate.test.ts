@@ -8,7 +8,7 @@ import type { ContextProjection, Event, Message, SystemCall } from "@tau/contrac
 import { toolResult, toolError } from "@tau/contract"
 import type { LlmCollectResult, LlmKernel, LlmRequest } from "@tau/llm"
 import { createActionPlane, type ActionPlane } from "@tau/action"
-import { createScheduler } from "../src/index.ts"
+import { createScheduler, runSubagent, depthOf, listSubagents, subagentUsage, SUBAGENT_DEFAULT_TOOLS } from "../src/index.ts"
 
 type LlmBehavior = (calls: number) => LlmCollectResult
 
@@ -165,6 +165,29 @@ describe("orchestrate:turn 状态机", () => {
     scheduler.subscribe((e) => events.push(e))
     await scheduler.prompt({ text: "循环" })
     expect(events.some((e) => e.kind === "loop_detected")).toBe(true)
+  })
+
+  it("turn 提交点:审计带 turnId,commitTurn 落 kv 锚点,已提交 turn 崩溃恢复不误报", async () => {
+    const { store, scheduler } = fresh((calls) =>
+      calls === 0
+        ? { text: "", thinking: "", toolCalls: [{ id: "t1", name: "read", args: { path: "a.txt" } }], usage: undefined, finishReason: "tool-calls", error: undefined, aborted: false }
+        : { text: "收尾", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop", error: undefined, aborted: false },
+    )
+    await scheduler.prompt({ text: "读文件" })
+    const audit = store.audit.query({ sessionId: "s1" })
+    expect(audit.length).toBeGreaterThan(0)
+    const turnIds = [...new Set(audit.map((a) => a.turnId))]
+    expect(turnIds).toHaveLength(1)
+    expect(turnIds[0]).toMatch(/^t\d+$/)
+    // 提交锚点 = 最后提交的 turn(最后文本 turn 无 syscall,锚点应晚于/等于审计 turn)
+    const committed = store.kv.get("committed:s1")
+    expect(committed).toBeDefined()
+    const epochOf = (id: string) => Number(id.slice(1))
+    expect(epochOf(committed!)).toBeGreaterThanOrEqual(epochOf(turnIds[0]!))
+    // 重建会话:turn 已提交,无悬置 → 不误报 recovery
+    const second = createSession({ store, sessionId: "s1", cwd: "/tmp/tau-test", workspaceRoots: ["/tmp/tau-test"] })
+    expect(store.events.replay("s1").some((e) => e.kind === "recovery")).toBe(false)
+    second.close()
   })
 
   it("abort:中断当前 turn → interrupted 事件 + aborted 结果", async () => {
@@ -335,5 +358,177 @@ describe("orchestrate:steer 队列不丢(audit8 P0-5)", () => {
     expect(steerAdmits.length).toBe(1)
     const texts2 = texts
     void texts2
+  })
+})
+
+describe("orchestrate:steer 立即断流(interrupt: immediate,M10.3-a)", () => {
+  it("缺省粒度不变:steer 只等在飞工具完成(不传 signal)", async () => {
+    const events: Event[] = []
+    let calls = 0
+    const f = fresh(() => {
+      const text = calls === 0 ? "干活" : "后续"
+      calls++
+      return { text, thinking: "", toolCalls: calls === 1 ? [{ id: "t1", name: "bash", args: { command: "echo ran" } }] : [], usage: undefined, finishReason: "stop" as const, error: undefined, aborted: false }
+    })
+    const unsub = f.scheduler.subscribe((e) => events.push(e))
+    const p = f.scheduler.prompt({ text: "开始" })
+    await f.scheduler.steer({ text: "打断" })
+    const result = await p
+    unsub()
+    expect(result.aborted).toBe(false)
+    expect(events.filter((e) => e.kind === "interrupted").length).toBe(0)
+  })
+
+  it("立即断流:在飞 bash 被杀(cancelled),剩余调用不执行,已提交结果落盘,interrupted 事件发出", async () => {
+    const store = createMemoryStore()
+    const session = createSession({ store, sessionId: "s1", cwd: "/tmp/tau-test", workspaceRoots: ["/tmp/tau-test"] })
+    const llm = fakeLlm((calls) => {
+      if (calls > 0) return { text: "停了", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop" as const, error: undefined, aborted: false }
+      return {
+        text: "",
+        thinking: "",
+        toolCalls: [
+          { id: "t1", name: "bash", args: { command: "sleep 3; echo SLEPT" } },
+          { id: "t2", name: "bash", args: { command: "echo NOOP" } },
+        ],
+        usage: undefined,
+        finishReason: "stop" as const,
+        error: undefined,
+        aborted: false,
+      }
+    })
+    const events: Event[] = []
+    const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true, onEvent: (e) => events.push(e) })
+    const scheduler = createScheduler({ llm, session, action }, { model: "fake", maxTurns: 5, maxTurnMs: 2000, maxRetries: 1, loopGuard: 2 })
+    const unsub = scheduler.subscribe((e) => events.push(e))
+    const p = scheduler.prompt({ text: "开始" })
+    for (let i = 0; i < 2000 && !events.some((e) => e.kind === "tool" && e.state === "started" && e.toolCallId === "t1"); i++) {
+      await Bun.sleep(2)
+    }
+    await scheduler.steer({ text: "立刻停" }, { interrupt: "immediate" })
+    const result = await p
+    unsub()
+    expect(result.aborted).toBe(true)
+    expect(events.some((e) => e.kind === "interrupted")).toBe(true)
+    // 在飞 bash 以 cancelled 收尾(已提交),t2 从未执行(无审计条目)
+    const audit = store.audit.query({ sessionId: "s1" })
+    const bashEntries = audit.filter((e) => e.action.startsWith("bash:"))
+    expect(bashEntries.some((e) => e.detail.includes("sleep"))).toBe(true)
+    expect(bashEntries.some((e) => e.detail.includes("NOOP"))).toBe(false)
+    const t1Result = session.project().history.find((m) => m.role === "tool" && m.toolResults[0]?.callId === "t1")
+    expect(t1Result?.toolResults[0]?.error?.code).toBe("cancelled")
+  })
+
+  it("立即断流:挂起询问未决即中止(不挂等决议)", async () => {
+    const store = createMemoryStore()
+    const session = createSession({ store, sessionId: "s1", cwd: "/tmp/tau-test", workspaceRoots: ["/tmp/tau-test"] })
+    let llmCalls = 0
+    const llm = fakeLlm(() => {
+      const isFirst = llmCalls++ === 0
+      if (!isFirst) return { text: "停了", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop" as const, error: undefined, aborted: false }
+      return { text: "", thinking: "", toolCalls: [{ id: "t1", name: "bash", args: { command: "echo ask" } }], usage: undefined, finishReason: "stop" as const, error: undefined, aborted: false }
+    })
+    const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: false })
+    const scheduler = createScheduler({ llm, session, action }, { model: "fake", maxTurns: 5, maxTurnMs: 2000, maxRetries: 1, loopGuard: 2 })
+    const p = scheduler.prompt({ text: "开始" })
+    for (let i = 0; i < 2000 && !action.permissionRequest().some((r) => r.toolCallId === "t1"); i++) {
+      await Bun.sleep(2)
+    }
+    expect(action.permissionRequest().length).toBe(1)
+    await scheduler.steer({ text: "立刻停" }, { interrupt: "immediate" })
+    const result = await p
+    expect(result.aborted).toBe(true)
+    expect(action.permissionRequest().length).toBe(0)
+  })
+})
+
+describe("orchestrate:subagent 生命周期管理器(M12)", () => {
+
+  it("foreground:任务执行 + 白名单 capability 递减 + 注册表落盘", async () => {
+    const { store, session } = freshSession()
+    const llm = fakeLlm(() => ({ text: "调查结果:文件存在", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop" as const, error: undefined, aborted: false }))
+    const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
+
+    const result = await runSubagent(
+      { llm, store, action, session },
+      { parentSessionId: "s1", task: "检查 a.txt 是否存在" },
+    )
+    expect(result.status).toBe("completed")
+    expect(result.depth).toBe(1)
+    expect(result.turns).toBeGreaterThanOrEqual(1)
+    expect(result.sessionId.startsWith("s1-sub-")).toBe(true)
+
+    // 子会话落 store + 注册表(parentId 链)
+    const child = store.sessions.get(result.sessionId)
+    expect(child).not.toBeNull()
+    const regs = listSubagents(store, "s1")
+    expect(regs.length).toBe(1)
+    expect(regs[0]!.status).toBe("completed")
+    expect(depthOf(store, result.sessionId)).toBe(1)
+    expect(depthOf(store, "s1")).toBe(0)
+
+    // 工作树已清理
+    expect(store.kv.list(".tau")).toHaveLength(0)
+    void SUBAGENT_DEFAULT_TOOLS
+  })
+
+  it("capability 递减:白名单外工具被拒绝,子会话只投影白名单", async () => {
+    const { store, session } = freshSession()
+    let askedWrite = false
+    const llm = fakeLlm(() => {
+      if (!askedWrite) {
+        askedWrite = true
+        return { text: "", thinking: "", toolCalls: [{ id: "t1", name: "write", args: { path: "x.txt", content: "x" } }], usage: undefined, finishReason: "tool-calls" as const, error: undefined, aborted: false }
+      }
+      return { text: "done", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop" as const, error: undefined, aborted: false }
+    })
+    const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
+
+    const result = await runSubagent(
+      { llm, store, action, session },
+      { parentSessionId: "s1", task: "写文件" },
+    )
+    // write 不在缺省只读白名单:子会话投影无 write,调用被拒绝,不会真写入
+    expect(result.status).toBe("completed")
+    expect(store.audit.query({ sessionId: result.sessionId }).some((a) => a.action === "write:rejected")).toBe(true)
+    void SUBAGENT_DEFAULT_TOOLS
+  })
+
+  it("并发上限:超限拒绝派生(status partial)", async () => {
+    const { store, session } = freshSession()
+    const llm = fakeLlm(() => ({ text: "ok", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop" as const, error: undefined, aborted: false }))
+    const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
+
+    const blocker = runSubagent(
+      { llm, store, action, session },
+      { parentSessionId: "s1", task: "慢任务" },
+      { maxTurns: 1 },
+    )
+    // 占位:blocker 尚未完成,第二个同父会话并发受限(maxPerParent 压到 1)
+    const second = await runSubagent(
+      { llm, store, action, session },
+      { parentSessionId: "s1", task: "第二个" },
+      { maxTurns: 1, maxPerParent: 1 },
+    )
+    await blocker
+    expect(second.status).toBe("partial")
+    expect(second.text).toContain("并发超限")
+    expect(subagentUsage().global).toBe(0)
+  })
+
+  it("深度上限:嵌套过深拒绝派生", async () => {
+    const { store, session } = freshSession()
+    const llm = fakeLlm(() => ({ text: "ok", thinking: "", toolCalls: [], usage: undefined, finishReason: "stop" as const, error: undefined, aborted: false }))
+    const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-test"], autoApprove: true })
+    const deps = { llm, store, action, session }
+
+    const l1 = await runSubagent(deps, { parentSessionId: "s1", task: "1" }, { maxTurns: 1 })
+    const l2 = await runSubagent(deps, { parentSessionId: l1.sessionId, task: "2" }, { maxTurns: 1 })
+    const l3 = await runSubagent(deps, { parentSessionId: l2.sessionId, task: "3" }, { maxTurns: 1, maxDepth: 2 })
+    expect(l1.depth).toBe(1)
+    expect(l2.depth).toBe(2)
+    expect(l3.depth).toBe(3)
+    expect(l3.status).toBe("partial")
+    expect(l3.text).toContain("深度超限")
   })
 })

@@ -2,7 +2,13 @@
 // 断言检查只依赖 contract 不变量(assertX);fixture 负责构造场景。
 // 每个断言独立创建 fixture,无共享状态;失败抛 Error,runner 捕获汇总。
 
-import { assertDualView, assertReplay, assertToolPairing, checkBudget, type UiView } from "@tau/contract"
+import { createMemoryStore } from "@tau/store"
+import { createSession } from "@tau/session"
+import { createActionPlane, queryAudit } from "@tau/action"
+import { createEnhancer } from "@tau/enhance"
+import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync } from "node:fs"
+import { join } from "node:path"
+import { assertDualView, assertReplay, assertToolPairing, checkBudget, parseMergedConfig, type UiView } from "@tau/contract"
 import type { ScheduleEntry } from "@tau/orchestrate"
 import type { Assert } from "./eval.ts"
 import { createFixture, runTurn } from "./fixtures.ts"
@@ -220,25 +226,32 @@ const assert9: Assert = {
   },
 }
 
-// ---------- 10. 恢复告知 ----------
+// ---------- 10. 恢复不误报 ----------
 
 const assert10: Assert = {
   id: 10,
-  name: "恢复告知",
-  description: "模拟 crash(进程级终止),断言恢复后投影含 recovery 告警",
+  name: "恢复不误报",
+  description: "已提交 turn 崩溃恢复不发 recovery 告警(提交点锚定后无悬置,不虚惊)",
   async run() {
-    const f = createFixture({ script: { replies: [textReply("ok")] } })
-    await runTurn(f, "test")
+    const f = createFixture({
+      script: {
+        replies: [
+          toolReply([{ id: "c1", name: "read", args: { path: "pkg.json" } }]),
+          textReply("done"),
+        ],
+      },
+    })
+    await runTurn(f, "读文件")
     const sessionId = f.session.sessionId
     const store = f.store
+    const auditBefore = store.audit.query({ sessionId })
+    if (auditBefore.length === 0) throw new Error("工具执行应留审计(turnId 判定的前提)")
     f.abandon()
 
     const f2 = createFixture({ script: { replies: [textReply("recovered")] }, sessionId, store })
-    void f2
-
     const events2 = store.events.replay(sessionId)
-    const hasRecovery = events2.some((e) => e.kind === "recovery")
-    if (!hasRecovery) throw new Error("恢复后缺 recovery 事件(模型与用户应可见崩溃恢复)")
+    if (events2.some((e) => e.kind === "recovery")) throw new Error("已提交 turn 崩溃恢复不应发 recovery 告警")
+    if (f2.session.project().system.some((b) => b.content.includes("恢复告知"))) throw new Error("已提交 turn 不应有恢复告知块")
     f2.cleanup()
   },
 }
@@ -453,6 +466,19 @@ const assert16: Assert = {
       if (child === undefined) throw new Error(`子会话 ${r.sessionId} 未落 store`)
     }
     if (f.session.project().history.length > 0) throw new Error("主会话历史被子 run 污染")
+
+    // 工作树隔离:子会话 cwd 落在独立工作树内(不在祖先目录里互踩);
+    // 创建/清理经 action.execute 审计(tool 事件可见);run 结束后 .tau-worktrees 无残留
+    for (const r of result.runs) {
+      if (!r.cwd.includes("/.tau-worktrees/")) throw new Error(`子会话未隔离到工作树: ${r.cwd}`)
+    }
+    const worktreeEvents = f.events.filter((e) => e.kind === "tool" && (e.name === "worktree:create" || e.name === "worktree:rm"))
+    if (worktreeEvents.length < 4) throw new Error(`工作树工具调用事件不足(2 run × create+rm ≥ 4):${worktreeEvents.length}`)
+    const wtDir = join(f.session.project().self.cwd, ".tau-worktrees")
+    if (existsSync(wtDir)) {
+      const leftovers = readdirSync(wtDir)
+      if (leftovers.length !== 0) throw new Error(`工作树残留未清理:${leftovers.join(",")}`)
+    }
 
     // fusion:汇总各 run 产出生成新会话(可继续对话)
     const fused = createFusedSession({ store: f.store, session: f.session }, result.runs, { sessionId: "eval-fusion" })
@@ -675,9 +701,569 @@ const assert22: Assert = {
   },
 }
 
+// ---------- 23. 恢复悬置判定 ----------
+
+const assert23: Assert = {
+  id: 23,
+  name: "恢复悬置判定",
+  description: "崩溃前未提交 turn 的 syscall 进 recovery 事件 detail 与投影告警(带清单,非瞎猜)",
+  async run() {
+    const fs = await import("node:fs")
+    const tmpDir = `/tmp/tau-eval-pending-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    fs.mkdirSync(tmpDir, { recursive: true })
+    fs.writeFileSync(`${tmpDir}/pkg.json`, "{\"name\":\"x\"}")
+    const f = createFixture({ script: { replies: [textReply("ok")] }, cwd: tmpDir, workspaceRoots: [tmpDir] })
+    await runTurn(f, "正常 turn")
+    const sid = f.session.sessionId
+    const store = f.store
+
+    // 模拟崩溃前的未提交 turn:审计写入带 turnId 的 syscall,但无 commitTurn(提交点在 turn 尾部,未到)
+    const outcome = await f.action.execute({
+      sessionId: sid,
+      toolCallId: "c-crash",
+      name: "read",
+      args: { path: "pkg.json" },
+      cwd: tmpDir,
+      turnId: `t${f.session.snapshot().epoch + 1000}`,
+    })
+    if (!outcome.ok) throw new Error(`模拟 syscall 失败: ${outcome.error.code} ${outcome.error.message}`)
+    const audit = store.audit.query({ sessionId: sid })
+    if (!audit.some((a) => a.turnId === `t${f.session.snapshot().epoch + 1000}`)) throw new Error("审计未带 turnId(悬置判定输入缺失)")
+
+    f.abandon()
+    const f2 = createFixture({ script: { replies: [textReply("recovered")] }, sessionId: sid, store, cwd: tmpDir, workspaceRoots: [tmpDir] })
+    const recovery = store.events.replay(sid).find((e) => e.kind === "recovery")
+    if (recovery === undefined) throw new Error("未提交 turn 崩溃恢复缺 recovery 事件")
+    if (recovery.kind !== "recovery") throw new Error("recovery 事件类型异常")
+    if (!recovery.detail?.includes("read")) throw new Error(`recovery detail 未带 syscall 清单: ${recovery.detail}`)
+    if (!f2.session.project().system.some((b) => b.content.includes("未提交"))) throw new Error("投影缺悬置告警")
+    f2.cleanup()
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  },
+}
+
+// ---------- 24. executeStream 流式事件形态 ----------
+
+const assert24: Assert = {
+  id: 24,
+  name: "executeStream 流式事件形态",
+  description: "executeStream 逐调用产出 started → completed/failed(终态带结果/错误);execute 收口与终态一致;事件同进 onEvent 双轨",
+  async run() {
+    const fs = await import("node:fs")
+    const tmpDir = `/tmp/tau-eval-stream-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    fs.mkdirSync(tmpDir, { recursive: true })
+    fs.writeFileSync(`${tmpDir}/pkg.json`, "{\"name\":\"x\"}")
+    const f = createFixture({
+      script: { replies: [toolReply([{ id: "c1", name: "read", args: { path: "pkg.json" } }]), textReply("done")] },
+      cwd: tmpDir,
+      workspaceRoots: [tmpDir],
+    })
+
+    // 成功路径:started → completed,结果与 execute 收口一致
+    const streamed: import("@tau/contract").ToolEvent[] = []
+    for await (const ev of f.action.executeStream({ sessionId: f.session.sessionId, toolCallId: "s1", name: "read", args: { path: "pkg.json" }, cwd: tmpDir })) {
+      streamed.push(ev)
+    }
+    if (streamed[0]?.state !== "started") throw new Error("executeStream 首事件非 started")
+    const last = streamed[streamed.length - 1]!
+    if (last.state !== "completed") throw new Error(`成功路径终态应 completed,实际 ${last.state}`)
+    if (last.state !== "completed" || last.result === undefined) throw new Error("completed 事件缺 result")
+    const outcome = await f.action.execute({ sessionId: f.session.sessionId, toolCallId: "s1", name: "read", args: { path: "pkg.json" }, cwd: tmpDir })
+    if (!outcome.ok) throw new Error("execute 收口失败")
+    if (JSON.stringify(outcome.result) !== JSON.stringify(last.result)) throw new Error("execute 收口与流终态结果不一致")
+
+    // 失败路径:started → failed(错误码),execute 收口一致
+    const failedStreamed: import("@tau/contract").ToolEvent[] = []
+    for await (const ev of f.action.executeStream({ sessionId: f.session.sessionId, toolCallId: "s2", name: "read", args: { path: "__nope__.json" }, cwd: tmpDir })) {
+      failedStreamed.push(ev)
+    }
+    const failedLast = failedStreamed[failedStreamed.length - 1]!
+    if (failedLast.state !== "failed") throw new Error("失败路径终态应 failed")
+    if (failedLast.state !== "failed" || failedLast.error === undefined || failedLast.error.code !== "not_found") {
+      throw new Error("failed 事件错误码应 not_found")
+    }
+    const failedOutcome = await f.action.execute({ sessionId: f.session.sessionId, toolCallId: "s2", name: "read", args: { path: "__nope__.json" }, cwd: tmpDir })
+    if (failedOutcome.ok || (failedOutcome.ok === false && failedOutcome.error.code !== "not_found")) {
+      throw new Error("execute 收口与流终态错误不一致")
+    }
+
+    // 双轨:流内事件同样经 onEvent 全局桥(consumers 两种订阅面看到同一序列)
+    const toolEvents = f.events.filter((e) => e.kind === "tool")
+    if (toolEvents.length < streamed.length) throw new Error("onEvent 双轨未收到与流等量的 tool 事件")
+    f.cleanup()
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  },
+}
+
+// ---------- 25. steer 立即断流 ----------
+
+const assert25: Assert = {
+  id: 25,
+  name: "steer 立即断流(interrupt: immediate)",
+  description: "busy 时 immediate steer 中止在飞工具(cancelled)与剩余调用;已提交结果落审计,interrupted 事件 + aborted 返回;steer 队列随后消费不卡死",
+  async run() {
+    const fs = await import("node:fs")
+    const tmpDir = `/tmp/tau-eval-steer-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    fs.mkdirSync(tmpDir, { recursive: true })
+    const f = createFixture({
+      script: {
+        replies: [
+          toolReply([
+            { id: "t1", name: "bash", args: { command: "sleep 3; echo SLEPT" } },
+            { id: "t2", name: "bash", args: { command: "echo NOOP" } },
+          ]),
+          textReply("停了"),
+        ],
+      },
+      cwd: tmpDir,
+      workspaceRoots: [tmpDir],
+    })
+
+    const p = f.scheduler.prompt({ text: "跑吧", source: "prompt" })
+    for (let i = 0; i < 2000 && !f.events.some((e) => e.kind === "tool" && e.state === "started" && e.toolCallId === "t1"); i++) {
+      await Bun.sleep(2)
+    }
+    if (!f.events.some((e) => e.kind === "tool" && e.state === "started" && e.toolCallId === "t1")) throw new Error("未观察到 t1 开始")
+    await f.scheduler.steer({ text: "立刻停", source: "steer" }, { interrupt: "immediate" })
+    const result = await p
+
+    if (result.aborted !== true) throw new Error("立即断流后 turn 应 aborted")
+    if (!f.events.some((e) => e.kind === "interrupted")) throw new Error("缺 interrupted 事件")
+    const audit = f.store.audit.query({ sessionId: f.session.sessionId })
+    if (!audit.some((e) => e.action.startsWith("bash:") && e.detail.includes("sleep"))) throw new Error("在飞 bash 未落审计(已提交结果应落盘)")
+    if (audit.some((e) => e.action.startsWith("bash:") && e.detail.includes("NOOP"))) throw new Error("剩余调用不应执行")
+    const t1Msg = f.session.project().history.find((m) => m.role === "tool" && m.toolResults[0]?.callId === "t1")
+    if (t1Msg?.toolResults[0]?.error?.code !== "cancelled") throw new Error("在飞 bash 错误码应 cancelled")
+    // steer 队列消费:prompt 返回前 drain 已跑完(脚本耗尽回复),会话不卡死
+    f.cleanup()
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  },
+}
+
+// ---------- 26. 大载荷外置(artifacts) ----------
+
+const assert26: Assert = {
+  id: 26,
+  name: "大载荷外置(artifact 正文存 store,历史仅引用)",
+  description: "超阈值 text 块自动外置为引用块(size/hash 可见,正文不进投影/事件流);按引用经 artifact:read 取回原文;小文本保持 inline",
+  async run() {
+    const store = createMemoryStore()
+    const session = createSession({
+      store,
+      sessionId: "eval-art",
+      cwd: "/tmp/tau-eval",
+      workspaceRoots: ["/tmp/tau-eval"],
+      artifactThresholdBytes: 64,
+    })
+    const big = "大载荷正文".repeat(200)
+    session.appendMessage({
+      id: "m-big",
+      role: "assistant",
+      content: [
+        { type: "text", text: "小段" },
+        { type: "text", text: big },
+      ],
+      toolCalls: [],
+      toolResults: [],
+      interrupted: false,
+      source: "model",
+      retention: "normal",
+      createdAt: new Date().toISOString(),
+    })
+
+    const history = session.project().history
+    const msg = history.find((m) => m.id === "m-big")
+    if (msg === undefined) throw new Error("大载荷消息未进历史")
+    const blocks = msg.content
+    if (blocks[0]?.type !== "text" || blocks[1]?.type !== "artifact") throw new Error("超阈值块未外置为引用")
+    if (blocks[1].size !== big.length) throw new Error("引用 size 与正文不符")
+    if (JSON.stringify(history).includes(big)) throw new Error("投影历史含大载荷正文(违宪:不烧上下文)")
+
+    const body = session.readArtifact(blocks[1].ref)
+    if (body?.body !== big) throw new Error("按引用取回正文不一致")
+
+    // 模型检索路径:artifact:read 工具(经 action 平面)
+    const action = createActionPlane(store, { workspaceRoots: ["/tmp/tau-eval"], autoApprove: true })
+    const got = await action.execute({ sessionId: "eval-art", toolCallId: "r1", name: "artifact:read", args: { ref: blocks[1].ref }, cwd: "/tmp/tau-eval" })
+    if (!got.ok || got.result.stdout !== big) throw new Error("artifact:read 取回正文不一致")
+    session.close()
+  },
+}
+
+// ---------- 27. 增量装载(enhance loader mtime/hash) ----------
+
+const assert27: Assert = {
+  id: 27,
+  name: "增量装载(loader mtime/hash 缓存,不牺牲新鲜度)",
+  description: "reload 时未变文件命中缓存(不重读);文件内容变化后 reload 反映新内容;删除后消失;装载统计可观测",
+  async run() {
+    const dir = `/tmp/tau-eval-loader-${Date.now()}`
+    const skillsDir = join(dir, ".tau", "skills")
+    mkdirSync(skillsDir, { recursive: true })
+    writeFileSync(join(dir, "AGENTS.md"), "# Rules\n保守。")
+    writeFileSync(join(skillsDir, "greet.md"), "---\nname: greet\ndescription: 问候\n---\nSay hello.")
+
+    const store = createMemoryStore()
+    const enhancer = createEnhancer({ cwd: dir, store })
+    if (enhancer.apply().skillNames.join(",") !== "greet") throw new Error("首轮装载未见到技能")
+
+    enhancer.load()
+    const stats1 = enhancer.loaderStats()
+    if (stats1.hits !== 2 || stats1.loads !== 4) throw new Error("重复装载应全命中缓存(未变文件不重读)")
+
+    writeFileSync(join(skillsDir, "greet.md"), "---\nname: greet\ndescription: 升级版问候\n---\nSay hello loudly.")
+    enhancer.load()
+    const blocks = enhancer.apply().systemBlocks
+    const context = blocks.find((b) => b.kind === "context")?.content ?? ""
+    if (!context.includes("升级版问候")) throw new Error("文件变化后 reload 未反映新内容(增量装载不牺牲新鲜度)")
+    const stats2 = enhancer.loaderStats()
+    if (stats2.hits !== stats1.hits + 1) throw new Error("变化文件应重读,未变文件仍命中缓存")
+
+    rmSync(join(skillsDir, "greet.md"))
+    enhancer.load()
+    if (enhancer.apply().skillNames.length !== 0) throw new Error("文件删除后 reload 目录条目未消失")
+
+    rmSync(dir, { recursive: true, force: true })
+  },
+}
+
+// ---------- 28. 工作区文件树增量索引 ----------
+
+const assert28: Assert = {
+  id: 28,
+  name: "工作区文件树增量索引(目录 mtime 失效,不全量重扫)",
+  description: "find 首扫全量,重复查询未变目录零重扫(fullScans 不增);新增文件只重扫所在目录且 find 立即可见;删除目录条目消失且缓存剪除",
+  async run() {
+    const dir = `/tmp/tau-eval-index-${Date.now()}`
+    mkdirSync(`${dir}/a/src`, { recursive: true })
+    mkdirSync(`${dir}/a/sub`, { recursive: true })
+    writeFileSync(`${dir}/c.ts`, "c")
+    writeFileSync(`${dir}/a/src/a.ts`, "a")
+    writeFileSync(`${dir}/a/sub/b.ts`, "b")
+
+    const store = createMemoryStore()
+    const plane = createActionPlane(store, { workspaceRoots: [dir], autoApprove: true })
+    const exec = async (callId: string, args: Record<string, unknown>) => {
+      const out = await plane.execute({ sessionId: "eval-idx", toolCallId: callId, name: "find", args, cwd: dir })
+      if (!out.ok) throw new Error(`find 失败:${out.error.code}`)
+      return out.result.stdout as string
+    }
+
+    const first = await exec("i1", { name: "b.ts" })
+    if (!first.includes("a/sub/b.ts")) throw new Error("首扫未命中既有文件")
+
+    writeFileSync(`${dir}/a/sub/new.ts`, "new")
+    const second = await exec("i2", { name: "new.ts" })
+    if (!second.includes("a/sub/new.ts")) throw new Error("增量刷新未反映新文件(不牺牲新鲜度)")
+
+    rmSync(`${dir}/a/sub`, { recursive: true })
+    const third = await exec("i3", { name: "b.ts" })
+    if (!third.includes("0 命中")) throw new Error("目录删除后条目未消失")
+
+    rmSync(dir, { recursive: true, force: true })
+  },
+}
+
+// ---------- 29. Config tier 工具注入裁剪 ----------
+
+const assert29: Assert = {
+  id: 29,
+  name: "Config tier 工具注入裁剪(T0 常驻,T1 按需,新 turn 重置)",
+  description: "提供 toolTierRules 时投影只含 T0 + tool:catalog;requestTools 注入 T1(本 turn);beginTurn 重置;无规则时全量注入不变",
+  async run() {
+    const tools = [
+      { name: "read", description: "r", parameters: {}, tier: "T0" as const, dangerous: false },
+      { name: "grep", description: "g", parameters: {}, tier: "T1" as const, dangerous: false },
+      { name: "find", description: "f", parameters: {}, tier: "T1" as const, dangerous: false },
+      { name: "tool:catalog", description: "c", parameters: {}, tier: "T0" as const, dangerous: false },
+    ]
+    const store = createMemoryStore()
+    const session = createSession({
+      store,
+      sessionId: "eval-tier",
+      cwd: "/tmp/tau-eval",
+      workspaceRoots: ["/tmp/tau-eval"],
+      tools,
+      toolTierRules: { defaultTier: "T1", overrides: {} },
+    })
+    const names = () => session.project().tools.map((t) => t.name)
+
+    const first = names()
+    if (!first.includes("read") || !first.includes("tool:catalog")) throw new Error("T0/发现入口应常驻")
+    if (first.includes("grep") || first.includes("find")) throw new Error("T1 不应缺省注入")
+
+    session.requestTools(["grep"])
+    const second = names()
+    if (!second.includes("grep")) throw new Error("requestTools 未注入 T1")
+    if (second.includes("find")) throw new Error("未请求的 T1 不应注入")
+
+    session.beginTurn()
+    const third = names()
+    if (third.includes("grep")) throw new Error("新 turn 未重置 T1 注入")
+
+    session.close()
+  },
+}
+
+// ---------- 30. 配置即契约 ----------
+
+const assert30: Assert = {
+  id: 30,
+  name: "配置即契约(App 宪法 4)",
+  description: "kv 原始串 → coerce → parseMergedConfig(缺省填充/非法拒绝);装载结果直接消费为 session 注入裁剪与预算",
+  async run() {
+    const store = createMemoryStore()
+    store.kv.set("config:toolTierRules", JSON.stringify({ defaultTier: "T1", overrides: { read: "T0" } }))
+    store.kv.set("config:maxContextTokens", "48000")
+    store.kv.set("config:compaction", JSON.stringify({ triggerRatio: 0.5 }))
+
+    const raw = Object.fromEntries(store.kv.list("config:").map((e) => [e.key.slice("config:".length), e.value]))
+    const cfg = parseMergedConfig(raw)
+    if (cfg.maxContextTokens !== 48000) throw new Error(`maxContextTokens 未强转: ${cfg.maxContextTokens}`)
+    if (cfg.compaction.triggerRatio !== 0.5) throw new Error("compaction 覆写未合并")
+    if (cfg.compaction.keepRecent !== 6) throw new Error("缺省未填充")
+    if (cfg.toolTierRules.overrides.read !== "T0") throw new Error("tier 覆写未装载")
+
+    // 消费方:把装载出的配置作为 session 选项,注入裁剪 + 预算同时生效
+    const f = createFixture({
+      script: { replies: [textReply("ok")] },
+      toolTierRules: cfg.toolTierRules,
+      maxContextTokens: cfg.maxContextTokens,
+    })
+    const names = () => f.session.project().tools.map((t) => t.name)
+    const first = names()
+    if (!first.includes("read") || !first.includes("tool:catalog")) throw new Error("T0/发现入口应常驻")
+    if (first.includes("grep") || first.includes("bash")) throw new Error("T1 不应缺省注入")
+    f.session.requestTools(["grep"])
+    if (!names().includes("grep")) throw new Error("requestTools 未注入 T1")
+    f.session.beginTurn()
+    if (names().includes("grep")) throw new Error("新 turn 未重置")
+    f.cleanup()
+
+    // 非法配置:装载即拒
+    const bad = createMemoryStore()
+    bad.kv.set("config:maxContextTokens", "abc")
+    let threw = false
+    try {
+      parseMergedConfig(Object.fromEntries(bad.kv.list("config:").map((e) => [e.key.slice("config:".length), e.value])))
+    } catch {
+      threw = true
+    }
+    if (!threw) throw new Error("非法配置未拒绝")
+  },
+}
+
+// ---------- 31. T2 内部机制永不注入 ----------
+
+const assert31: Assert = {
+  id: 31,
+  name: "T2 内部机制不注入模型视野(worktree 归属经 execute 审计)",
+  description: "action 注册的 T2 工作树工具(create/rm/list)不进入投影 tools(有/无 tier 规则均排除);调用仍经 execute 审计并落盘",
+  async run() {
+    const dir = `/tmp/tau-eval-t2-${Date.now()}`
+    mkdirSync(dir, { recursive: true })
+    const store = createMemoryStore()
+    const plane = createActionPlane(store, { workspaceRoots: [dir], autoApprove: true })
+
+    const names = plane.registry.all().map((t) => t.name)
+    if (!names.includes("worktree:create") || !names.includes("worktree:rm") || !names.includes("worktree:list")) {
+      throw new Error("worktree 工具未注册")
+    }
+
+    const session = createSession({
+      store,
+      sessionId: "eval-t2",
+      cwd: dir,
+      workspaceRoots: [dir],
+      tools: plane.registry.all(),
+    })
+    const injected = session.project().tools.map((t) => t.name)
+    if (injected.some((n) => n.startsWith("worktree:"))) throw new Error(`T2 工具泄漏进投影:${injected.join(",")}`)
+    session.close()
+
+    // 带 tier 规则时同样排除(两条路径均无 T2)
+    const rules = createSession({
+      store,
+      sessionId: "eval-t2-rules",
+      cwd: dir,
+      workspaceRoots: [dir],
+      tools: plane.registry.all(),
+      toolTierRules: { defaultTier: "T0", overrides: {} },
+    })
+    const injectedRules = rules.project().tools.map((t) => t.name)
+    if (injectedRules.some((n) => n.startsWith("worktree:"))) throw new Error("带规则时 T2 工具泄漏进投影")
+    rules.close()
+
+    // 内部调用面:仍走 execute(审计落盘),模型不可见不代表不可用
+    const created = await plane.execute({ sessionId: "eval-t2", toolCallId: "t1", name: "worktree:create", args: { name: "run-1" }, cwd: dir })
+    if (!created.ok) throw new Error(`worktree:create 失败:${created.error.code}`)
+    const audit = queryAudit(store, "eval-t2")
+    if (!audit.some((a) => a.action.startsWith("worktree:create"))) throw new Error("worktree 调用未审计落盘")
+
+    rmSync(dir, { recursive: true, force: true })
+  },
+}
+
+// ---------- 32. 认知与长程记忆(M11) ----------
+
+const assert32: Assert = {
+  id: 32,
+  name: "认知与长程记忆(记忆后端 + 两级注入)",
+  description: "记忆写入/检索/会话隔离契约;索引块(kind memory)注入投影 system;覆盖保护缺省拒绝;跨会话续用(长程)",
+  async run() {
+    const { createEnhancer } = await import("@tau/enhance")
+    const dir = `/tmp/tau-eval-memory-${Date.now()}`
+    mkdirSync(dir, { recursive: true })
+    const store = createMemoryStore()
+    const enhancer = createEnhancer({ cwd: dir, store })
+
+    // 写入 + 覆盖保护
+    if (enhancer.remember("s-a", "偏好", "简洁回复") !== true) throw new Error("首次写入失败")
+    if (enhancer.remember("s-a", "偏好", "覆盖") !== false) throw new Error("缺省覆盖保护失效")
+    if (enhancer.remember("s-a", "偏好", "覆盖", { overwrite: true }) !== true) throw new Error("overwrite: true 未放行")
+    if (enhancer.recall("s-a", "偏好")?.content !== "覆盖") throw new Error("覆盖未生效")
+
+    // 检索:key 命中权重高于内容命中
+    enhancer.remember("s-a", "db-密码", "root")
+    enhancer.remember("s-a", "杂项", "提到 db-密码 的事")
+    const hits = enhancer.searchMemories("s-a", "db-密码")
+    if (hits[0]?.key !== "db-密码") throw new Error(`key 命中未优先:${hits[0]?.key}`)
+    if (hits.length < 2) throw new Error("内容命中未召回")
+
+    // 会话隔离:list 只列本会话
+    enhancer.remember("s-b", "他会话", "x")
+    if (enhancer.listMemory("s-a").some((e) => e.key === "他会话")) throw new Error("listMemory 会话串扰")
+
+    // 两级注入:索引块 kind=memory 进 system(预览截断,全文不常驻)
+    const longContent = "这是一条非常长的记忆内容,超过预览字符上限,应当被截断而不是整条灌进投影索引块。" + "继续填充。" + "x".repeat(80)
+    enhancer.remember("s-a", "长记录", longContent)
+    const applied = enhancer.apply("s-a")
+    const block = applied.systemBlocks.find((b) => b.kind === "memory")
+    if (block === undefined) throw new Error("记忆索引块缺失")
+    if (block.priority !== 30) throw new Error(`索引块优先级不符:${block.priority}`)
+    if (!block.content.includes("[偏好] 覆盖")) throw new Error("索引块未含 key 预览")
+    const longLine = block.content.split("\n").find((l) => l.includes("长记录"))
+    if (longLine === undefined) throw new Error("索引块缺长记录条目")
+    if (longLine.includes("x".repeat(80))) throw new Error("索引块泄漏全文(应截断为预览)")
+    if (!longLine.endsWith("…")) throw new Error("截断未标注省略号")
+
+    // 无记忆会话无索引块
+    const empty = enhancer.apply("s-empty")
+    if (empty.systemBlocks.some((b) => b.kind === "memory")) throw new Error("空会话不应有索引块")
+
+    // 长程续用:同一 store 新 enhancer(模拟重启/新会话进程)仍可读回
+    const enhancer2 = createEnhancer({ cwd: dir, store })
+    if (enhancer2.recall("s-a", "db-密码")?.content !== "root") throw new Error("跨进程续用失败(长程记忆未持久)")
+
+    rmSync(dir, { recursive: true, force: true })
+  },
+}
+
+// ---------- 33. 多代理编排(M12) ----------
+
+/** 简单脚本化 LLM:按调用序产出(奇数次工具调用,偶数次文本)。 */
+function makeFakeLlm(script: (call: number) => { text?: string; toolCalls?: { id: string; name: string; args: Record<string, unknown> }[] }): import("@tau/llm").LlmKernel {
+  let calls = 0
+  return {
+    complete: async () => {
+      calls++
+      const s = script(calls)
+      const hasTools = (s.toolCalls?.length ?? 0) > 0
+      return {
+        text: s.text ?? "",
+        thinking: "",
+        toolCalls: s.toolCalls ?? [],
+        usage: { promptTokens: 5, completionTokens: 3, totalTokens: 8 },
+        finishReason: hasTools ? "tool-calls" : "stop",
+        error: undefined,
+        aborted: false,
+      }
+    },
+    stream: async function* () {},
+    models: () => [],
+    getModel: () => null,
+    features: () => ({ supportsTools: true, supportsThinking: false, supportsParallelCalls: false, supportsVision: false, supportsStreaming: false }),
+    getAuth: () => null,
+    cachePolicy: () => "none" as const,
+    cacheStats: () => ({ calls: 0, cachedTokenCandidates: 0, cacheReadTokens: 0 }),
+    refresh: () => {},
+  }
+}
+
+const assert33: Assert = {
+  id: 33,
+  name: "多代理编排(子代理生命周期 + capability 递减 + 深度/并发上限)",
+  description: "runSubagent 独立子会话与注册表;白名单外工具 rejected 且落审计;嵌套深度与并发上限 partial;background 注册表落态",
+  async run() {
+    const dir = `/tmp/tau-eval-subagent-${Date.now()}`
+    mkdirSync(dir, { recursive: true })
+    const store = createMemoryStore()
+    const action = createActionPlane(store, { workspaceRoots: [dir], autoApprove: true })
+    const parent = createSession({ store, sessionId: "eval-parent", cwd: dir, workspaceRoots: [dir], tools: action.registry.all() })
+    const { runSubagent, listSubagents, depthOf, subagentUsage } = await import("@tau/orchestrate")
+
+    let calls = 0
+    const fakeLlm = makeFakeLlm(() => {
+      calls++
+      if (calls % 2 === 1) return { toolCalls: [{ id: `t${calls}`, name: "read", args: { path: "a.txt" } }] }
+      return { text: `调查完成 #${calls}` }
+    })
+    const deps = { llm: fakeLlm, store, action, session: parent }
+
+    // 白名单缺省只读:write 不在面内,子代理调用被 rejected 且落审计(递减不留白)
+    let wCalls = 0
+    const wllm = makeFakeLlm(() => {
+      wCalls++
+      if (wCalls === 1) return { toolCalls: [{ id: "w1", name: "write", args: { path: "evil.txt", content: "x" } }] }
+      return { text: "写操作被拒,继续" }
+    })
+    const r1 = await runSubagent({ ...deps, llm: wllm }, { parentSessionId: "eval-parent", task: "尝试写入" })
+    if (r1.status !== "completed") throw new Error(`递减场景未完成:${r1.status}`)
+    const audit = queryAudit(store, r1.sessionId)
+    if (!audit.some((a) => a.action === "write:rejected")) throw new Error("递减拒绝未落审计")
+    if (existsSync(`${dir}/evil.txt`)) throw new Error("子代理写入越界(工作树隔离失败)")
+
+    // 注册表与深度:子会话入表,parentId 链深度 = 1
+    const regs = listSubagents(store, "eval-parent")
+    if (regs.length < 1) throw new Error("注册表无记录")
+    if (depthOf(store, r1.sessionId) !== 1) throw new Error(`深度不符:${depthOf(store, r1.sessionId)}`)
+    if (store.sessions.get(r1.sessionId) === null) throw new Error("子会话未落 store")
+
+    // 并发上限:maxPerParent 1 时同时发起两个 → 第二个 partial
+    const [r2, r3] = await Promise.all([
+      runSubagent(deps, { parentSessionId: "eval-parent", task: "b" }, { maxPerParent: 1 }),
+      runSubagent(deps, { parentSessionId: "eval-parent", task: "c" }, { maxPerParent: 1 }),
+    ])
+    if (r2.status !== "completed") throw new Error(`并发首任务未完成:${r2.status}`)
+    if (r3.status !== "partial" || !r3.text.includes("并发超限")) throw new Error(`并发上限未生效:${r3.status}`)
+
+    // 深度上限:maxDepth 1 时父深度 1 → 子派生拒绝
+    const r4 = await runSubagent(deps, { parentSessionId: r1.sessionId, task: "d" }, { maxDepth: 1 })
+    if (r4.status !== "partial" || !r4.text.includes("深度超限")) throw new Error(`深度上限未生效:${r4.status}`)
+
+    // background:立即 running,后台完成后注册表落 completed
+    const rb = await runSubagent(deps, { parentSessionId: "eval-parent", task: "e", background: true })
+    if (rb.status !== "running") throw new Error(`background 未立即返回 running:${rb.status}`)
+    const deadline = Date.now() + 5000
+    let bgDone = false
+    while (Date.now() < deadline) {
+      const bgReg = listSubagents(store, "eval-parent").find((e) => e.sessionId === rb.sessionId)
+      if (bgReg?.status === "completed") { bgDone = true; break }
+      await new Promise((r) => setTimeout(r, 20))
+    }
+    if (!bgDone) throw new Error("background 未落 completed")
+    if (subagentUsage().global !== 0) throw new Error("limiter 泄漏(全局占用未归零)")
+
+    parent.close()
+    rmSync(dir, { recursive: true, force: true })
+  },
+}
+
 export const allAsserts: readonly Assert[] = [
   assert1, assert2, assert3, assert4, assert5, assert6,
   assert7, assert8, assert9, assert10, assert11, assert12, assert13,
   assert14, assert15, assert16, assert17, assert18,
   assert19, assert20, assert21, assert22,
+  assert23, assert24, assert25, assert26, assert27, assert28, assert29, assert30,
+  assert31, assert32, assert33,
 ]

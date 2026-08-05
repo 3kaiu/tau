@@ -7,6 +7,7 @@ import type { LlmKernel, LlmCollectResult, LlmRequest } from "@tau/llm"
 import type { Session } from "@tau/session"
 import type { ActionPlane } from "@tau/action"
 import { GoalJudge } from "./goals.ts"
+import { LoopGuard, turnIdOf } from "./lifecycle.ts"
 
 export type SchedulerDeps = {
   llm: LlmKernel
@@ -64,7 +65,7 @@ const clock = () => new Date().toISOString()
 
 export interface Scheduler {
   prompt(input: SchedulerInput): Promise<TurnResult>
-  steer(input: SchedulerInput): Promise<void>
+  steer(input: SchedulerInput, opts?: { interrupt?: "turn" | "immediate" }): Promise<void>
   abort(): void
   subscribe(fn: (event: Event) => void): () => void
   notify(event: Event): void
@@ -87,7 +88,7 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
   const goalContinueMaxTurns = options.goalContinueMaxTurns ?? 3
 
   const listeners = new Set<(event: Event) => void>()
-  const fingerprints = new Map<string, number>()
+  const behaviorGuard = new LoopGuard(loopGuard)
   let abortController: AbortController | null = null
   let running: Promise<unknown> | null = null
   let steerQueue: SchedulerInput[] = []
@@ -128,6 +129,8 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
         return { turns, text, toolCalls, aborted: true, error: lastError }
       }
       session.beginTurn()
+      // turnId = 会话 epoch(经 kv 持久:跨重启单调不重置,进程内同会话不重复);审计与提交点共用此锚
+      const turnId = turnIdOf(session.snapshot().epoch)
 
       let result: LlmCollectResult
       try {
@@ -181,17 +184,17 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
       for (const call of calls) {
         toolCalls++
         session.recordToolCall()
-        const fp = `${call.name}:${JSON.stringify(call.args)}`
-        const count = (fingerprints.get(fp) ?? 0) + 1
-        fingerprints.set(fp, count)
-        if (count > loopGuard) {
+        const pattern = behaviorGuard.check(call)
+        if (pattern !== null) {
           looped = true
-          emitRaw({ kind: "loop_detected", turn: turns, pattern: fp })
-          appendToolError(call.id, call.name, "rejected", `检测到循环:${fp} 已重复 ${count} 次,已停止`)
+          emitRaw({ kind: "loop_detected", turn: turns, pattern })
+          appendToolError(call.id, call.name, "rejected", `检测到循环:${pattern} 已重复超过 ${loopGuard} 次,已停止`)
           break
         }
         const outcome = await action.execute(
           { sessionId: session.sessionId, toolCallId: call.id, name: call.name, args: call.args as Record<string, unknown>, cwd: session.project().self.cwd,
+            turnId,
+            signal,
             // ask_user 挂起登记:pendingSyscalls 可见性由 session 承载(questionId 以 action 为准)
             onPending: (ask) => session.pendSyscall({ questionId: ask.questionId, toolCallId: ask.questionId, toolName: ask.toolName, summary: ask.summary }) },
           { timeoutMs: maxTurnMs },
@@ -201,7 +204,14 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
         } else {
           appendToolError(call.id, call.name, outcome.error.code, outcome.error.message)
         }
+        // 按需注入(T1 用过即注入本 turn 后续迭代;新 turn 由 session.beginTurn 重置)
+        session.requestTools([call.name])
+        // 立即断流(interrupt: "immediate"):在飞工具已中止(aborted),剩余调用不执行,本 turn 就此截断
+        if (signal.aborted) break
       }
+      // 提交点边界:本 turn 全部 syscall 结果已落盘,标记已提交(悬置判定:审计最后 turn ≠ 此锚 = 未提交)
+      if (signal.aborted) emitRaw({ kind: "interrupted", targetId: session.sessionId })
+      session.commitTurn(turnId)
       if (looped) break
       if (calls.length === 0) break
       // 上下文压缩:turn 尾部检查历史体积,超预算 → 摘要化老消息(下一轮看到压缩后历史)
@@ -287,13 +297,13 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
     }
   }
 
-  /** 投影历史体积估算(字符/4 ≈ token);超模型上下文窗阈值 → 摘要化老消息。 */
+  /** 投影历史体积估算(字符/4 ≈ token);artifact 引用按 size 计入,不因外置而漏算;超模型上下文窗阈值 → 摘要化老消息。 */
   async function maybeCompact(sessionIn: Session, strategy: CompactStrategy): Promise<void> {
     const projection = sessionIn.project()
     const history = projection.history
     const maxTokens = projection.self.model.contextWindow.maxTokens
     const estimatedTokens = history.reduce(
-      (n, m) => n + m.content.reduce((acc, b) => acc + (b.type === "text" ? b.text.length : 0), 0) / 4,
+      (n, m) => n + m.content.reduce((acc, b) => acc + (b.type === "text" ? b.text.length : b.type === "artifact" && b.size !== undefined ? b.size : 0), 0) / 4,
       0,
     )
     if (estimatedTokens <= maxTokens * (strategy.thresholdRatio ?? 0.7)) return
@@ -344,9 +354,11 @@ export function createScheduler(deps: SchedulerDeps, options: SchedulerOptions =
         running = null
       }
     },
-    async steer(input) {
+    async steer(input, opts = {}) {
       goalEpoch++
       steerEpoch++
+      // 立即断流:中止在飞 turn(llm 调用与工具执行共享 signal,工具收到 aborted;剩余调用不执行)
+      if (opts.interrupt === "immediate") abortController?.abort()
       steerQueue.push({ ...input, source: "steer" })
       if (running === null) {
         const next = steerQueue.shift()

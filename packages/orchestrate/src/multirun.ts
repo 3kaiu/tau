@@ -5,6 +5,7 @@
 import type { Event } from "@tau/contract"
 import type { Store } from "@tau/store"
 import type { LlmKernel } from "@tau/llm"
+import { createHash } from "node:crypto"
 import { createSession, type Session } from "@tau/session"
 import type { ActionPlane } from "@tau/action"
 import { createScheduler, type Scheduler, type TurnResult } from "./scheduler.ts"
@@ -20,6 +21,8 @@ export type RunResult = {
   sessionId: string
   result: TurnResult
   events: Event[]
+  /** 子会话 cwd:工作树隔离时指向独立 worktree;无工作树能力时退回祖先 cwd。 */
+  cwd: string
 }
 
 export type MultiRunResult = {
@@ -55,23 +58,37 @@ export async function runMultiRun(
       const events: Event[] = []
       const eventCollector = (event: Event) => events.push(event)
 
+      // 工作树归属:创建/清理委托 action(唯一副作用出口,经 execute 审计,tier T2 不注入)
+      const worktreeName = `${parent.sessionId.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 24)}-${createHash("sha256").update(childId).digest("hex").slice(0, 8)}`
+      let worktreeCwd = parentProj.self.cwd
+      try {
+        await deps.action.execute({ sessionId: parent.sessionId, toolCallId: `wt-${childId}`, name: "worktree:rm", args: { name: worktreeName } })
+        const created = await deps.action.execute({ sessionId: parent.sessionId, toolCallId: `wt-${childId}`, name: "worktree:create", args: { name: worktreeName } })
+        if (created.ok && created.result.stdout !== null) worktreeCwd = created.result.stdout
+      } catch {
+        // 无工作树能力(未绑定根/执行器缺省)时退回父会话 cwd,隔离降级不阻断运行
+      }
+
       const child = createSession({
         store: deps.store,
         sessionId: childId,
         parentId: parent.sessionId,
         sessionTitle: `multirun:${model}`,
-        cwd: parentProj.self.cwd,
-        workspaceRoots: parentProj.self.cwd === parentProj.self.cwd ? [...(deps.action.capabilities().workspaceRoots as readonly string[])] : [],
+        cwd: worktreeCwd,
+        workspaceRoots: [worktreeCwd],
         onEvent: eventCollector,
       })
       const scheduler: Scheduler = createScheduler(
         { llm: deps.llm, session: child, action: deps.action },
         { model, onEvent: eventCollector },
       )
-      const result = await scheduler.prompt({ text: task, source: "prompt" })
-      child.close()
-
-      return { model, sessionId: childId, result, events }
+      try {
+        const result = await scheduler.prompt({ text: task, source: "prompt" })
+        return { model, sessionId: childId, result, events, cwd: worktreeCwd }
+      } finally {
+        child.close()
+        await deps.action.execute({ sessionId: parent.sessionId, toolCallId: `wt-${childId}`, name: "worktree:rm", args: { name: worktreeName } })
+      }
     })
 
     const chunkResults = await Promise.all(chunkPromises)

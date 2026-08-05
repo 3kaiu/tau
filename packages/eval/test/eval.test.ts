@@ -1,9 +1,9 @@
-// @tau/eval - 套件测试:运行 17 个行为断言,验证全绿。
+// @tau/eval - 套件测试:运行全部行为断言,验证全绿。
 
 import { describe, expect, it } from "vitest"
 import { runSuite, allAsserts, formatSummary } from "../src/index.ts"
 
-describe("eval:17 个行为断言全绿", () => {
+describe("eval:全部行为断言全绿", () => {
   it("runSuite(allAsserts) 全部通过", async () => {
     const result = await runSuite(allAsserts)
     const failed = result.results.filter((r) => !r.passed)
@@ -15,7 +15,7 @@ describe("eval:17 个行为断言全绿", () => {
     expect(result.failed).toBe(0)
   }, 30000)
 
-  it("formatSummary 输出包含全部 17 个断言", async () => {
+  it("formatSummary 输出包含全部断言", async () => {
     const result = await runSuite(allAsserts)
     const summary = formatSummary(result)
     for (const a of allAsserts) {

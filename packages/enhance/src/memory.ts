@@ -1,5 +1,6 @@
 // @tau/enhance - memory.ts:T2 记忆(syscall 后端)。
 // 记忆是辅助不是主存:权威状态永远在 session;记忆只做检索增强。
+// 存储 = store.kv(前缀 memory:{sessionId}:),量级小(十到百级),线性扫描 + 时间衰减排序足够,不引 FTS。
 
 import type { Store } from "@tau/store"
 
@@ -8,15 +9,22 @@ const MEM_PREFIX = (sessionId: string) => `memory:${sessionId}:`
 export type MemoryEntry = {
   key: string
   content: string
+  createdAt: string
   updatedAt: string
 }
 
+export type MemoryScope = "session"
+
 /** 写入/覆盖记忆。overwrite 缺省 false:已存在 key 拒绝覆盖(返回 false),防模型误覆盖;overwrite: true 才允许。 */
 export function remember(store: Store, sessionId: string, key: string, content: string, opts: { overwrite?: boolean } = {}): boolean {
-  const existing = store.kv.get(`${MEM_PREFIX(sessionId)}${key}`)
+  const prefix = MEM_PREFIX(sessionId)
+  const existing = store.kv.get(`${prefix}${key}`)
   if (existing !== null && opts.overwrite !== true) return false
-  const entry: MemoryEntry = { key, content, updatedAt: new Date().toISOString() }
-  store.kv.set(`${MEM_PREFIX(sessionId)}${key}`, JSON.stringify(entry))
+  const now = new Date().toISOString()
+  const entry: MemoryEntry = existing === null
+    ? { key, content, createdAt: now, updatedAt: now }
+    : { key, content, createdAt: (JSON.parse(existing) as MemoryEntry).createdAt, updatedAt: now }
+  store.kv.set(`${prefix}${key}`, JSON.stringify(entry))
   return true
 }
 
@@ -36,26 +44,60 @@ export function forget(store: Store, sessionId: string, key: string): void {
   store.kv.delete(`${MEM_PREFIX(sessionId)}${key}`)
 }
 
-/** 列举会话所有记忆 key。 */
-export function listMemory(store: Store, sessionId: string): string[] {
+/** 列举会话所有记忆 key(按更新序倒序,最新在前;同刻按 key 倒序保持确定性)。 */
+export function listMemory(store: Store, sessionId: string): readonly MemoryEntry[] {
   const prefix = MEM_PREFIX(sessionId)
-  const keys: string[] = []
-  // memory store 没有前缀扫描,用 kv 全量过滤(sqlite 同理走 kv)
-  // 性能:记忆量级小(十到百级),线性扫描可接受;M7+ 加 FTS5 索引
-  for (const k of iterKvKeys(store)) {
-    if (k.startsWith(prefix)) keys.push(k.slice(prefix.length))
-  }
-  return keys
+  return store.kv
+    .list(prefix)
+    .map((e) => {
+      try {
+        return JSON.parse(e.value) as MemoryEntry
+      } catch {
+        return null
+      }
+    })
+    .filter((e): e is MemoryEntry => e !== null)
+    .sort((a, b) =>
+      a.updatedAt === b.updatedAt
+        ? a.createdAt === b.createdAt
+          ? b.key.localeCompare(a.key)
+          : a.createdAt < b.createdAt
+            ? 1
+            : -1
+        : a.updatedAt < b.updatedAt
+          ? 1
+          : -1,
+    )
 }
 
-/** kv 全量 key 迭代(memory 与 sqlite 行为对齐)。 */
-function iterKvKeys(store: Store): string[] {
-  // MemoryStore 内部 Map 可直接迭代;SqliteStore 走 SELECT
-  // 但接口不泄漏实现,用已知 key 前缀探测
-  // 对于 M6,记忆 key 格式固定为 memory:{sessionId}:{key}
-  // 此处用 store.kv 的已知行为:get/set/delete 无前缀扫描
-  // 替代方案:在 Enhancer 维护一个 key 索引
-  // M6 简化:返回空列表(listMemory 在 M6 非核心,remember/recall/forget 是主路径)
-  void store
-  return []
+/**
+ * 记忆检索:key/content 命中打分(key 命中权重高)+ 时间衰减(越新越靠前)。
+ * 缺省上限 5 条(检索是辅助,不整包灌入);全量线性扫描,量级小可接受。
+ */
+export function searchMemories(
+  store: Store,
+  sessionId: string,
+  query: string,
+  opts: { limit?: number } = {},
+): readonly MemoryEntry[] {
+  const limit = opts.limit ?? 5
+  const q = query.trim().toLowerCase()
+  if (q === "") return []
+  const now = Date.now()
+  const hits: Array<{ entry: MemoryEntry; score: number }> = []
+  for (const entry of listMemory(store, sessionId)) {
+    const key = entry.key.toLowerCase()
+    const content = entry.content.toLowerCase()
+    let match = 0
+    if (key.includes(q)) match += 3
+    if (content.includes(q)) match += 1
+    if (match === 0) continue
+    const ageDays = Math.max(0, now - Date.parse(entry.updatedAt)) / 86_400_000
+    const score = match / (1 + ageDays * 0.2)
+    hits.push({ entry, score })
+  }
+  return hits
+    .sort((a, b) => (b.score === a.score ? (a.entry.updatedAt < b.entry.updatedAt ? 1 : -1) : b.score - a.score))
+    .slice(0, limit)
+    .map((h) => h.entry)
 }

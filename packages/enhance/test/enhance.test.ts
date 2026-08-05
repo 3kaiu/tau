@@ -1,13 +1,14 @@
 // @tau/enhance - 单测:frontmatter 解析、skill 装载、记忆、摘要、enhancer 聚合。
 
-import { describe, expect, it, beforeEach, afterEach } from "vitest"
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest"
 import { mkdirSync, writeFileSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { parseFrontmatter } from "../src/frontmatter.ts"
 import { loadSkills, catalogBlock, getSkillText } from "../src/skills.ts"
-import { remember, recall, forget } from "../src/memory.ts"
+import { remember, recall, forget, listMemory, searchMemories } from "../src/memory.ts"
 import { ruleSummarize } from "../src/summarize.ts"
 import { createEnhancer } from "../src/enhancer.ts"
+import { LoaderCache, sha256 } from "../src/loader.ts"
 import {
   createTrustedPluginRegistry,
   createPlugin,
@@ -131,6 +132,61 @@ describe("memory: remember/recall/forget", () => {
     expect(recall(store, "s1", "locked")?.content).toBe("old")
     expect(remember(store, "s1", "locked", "new", { overwrite: true })).toBe(true)
     expect(recall(store, "s1", "locked")?.content).toBe("new")
+  })
+
+  it("overwrite 保留 createdAt,更新 updatedAt", () => {
+    remember(store, "s1", "timed", "v1")
+    const created = recall(store, "s1", "timed")!.createdAt
+    remember(store, "s1", "timed", "v2", { overwrite: true })
+    const updated = recall(store, "s1", "timed")!
+    expect(updated.createdAt).toBe(created)
+    expect(updated.content).toBe("v2")
+  })
+})
+
+describe("memory: listMemory + searchMemories(M11 真实化)", () => {
+  const store = createMemoryStore()
+
+  it("listMemory 真实枚举(前缀 kv,更新序倒序)", () => {
+    remember(store, "s-m1", "a", "alpha")
+    remember(store, "s-m1", "b", "beta")
+    remember(store, "s-m1", "c", "gamma")
+    const keys = listMemory(store, "s-m1").map((e) => e.key)
+    expect(keys).toEqual(["c", "b", "a"])
+    expect(listMemory(store, "s-m1")[0]?.updatedAt).toBeTruthy()
+  })
+
+  it("listMemory 会话隔离:只列本会话", () => {
+    remember(store, "s-other", "x", "1")
+    const keys = listMemory(store, "s-m1").map((e) => e.key)
+    expect(keys).not.toContain("x")
+  })
+
+  it("searchMemories:key 命中权重高于内容命中", () => {
+    remember(store, "s-m1", "db-密码", "root")
+    remember(store, "s-m1", "杂项", "提到 db-密码 的事")
+    const hits = searchMemories(store, "s-m1", "db-密码")
+    expect(hits[0]?.key).toBe("db-密码")
+    expect(hits.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it("searchMemories:空查询不命中,limit 生效", () => {
+    expect(searchMemories(store, "s-m1", "  ")).toEqual([])
+    const hits = searchMemories(store, "s-m1", "db", { limit: 1 })
+    expect(hits.length).toBe(1)
+  })
+
+  it("searchMemories:时间衰减越新越靠前", () => {
+    vi.useFakeTimers()
+    try {
+      remember(store, "s-m1", "旧记录", "同一个词")
+      vi.advanceTimersByTime(86_400_000 * 3)
+      remember(store, "s-m1", "新记录", "同一个词")
+      const hits = searchMemories(store, "s-m1", "同一个词")
+      expect(hits[0]?.key).toBe("新记录")
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -326,6 +382,24 @@ describe("enhancer: createEnhancer 聚合", () => {
     expect(enhancer.recall("s1", "pref")).toBeNull()
   })
 
+  it("apply(sessionId) 注入记忆索引块(两级装载:索引常驻,全文按需)", () => {
+    const store = createMemoryStore()
+    const enhancer = createEnhancer({ cwd: tmpDir, store })
+    enhancer.remember("s1", "偏好", "用户偏好简洁回复,不要啰嗦")
+    enhancer.remember("s1", "项目", "tau 是 LLM 宿主项目")
+
+    const applied = enhancer.apply("s1")
+    const memoryBlock = applied.systemBlocks.find((b) => b.kind === "memory")
+    expect(memoryBlock).toBeDefined()
+    expect(memoryBlock!.priority).toBe(30)
+    expect(memoryBlock!.content).toContain("[偏好] 用户偏好简洁回复,不要啰嗦")
+    expect(memoryBlock!.content).toContain("memory:read")
+
+    // 无记忆时无 memory 块;其他会话隔离
+    const empty = enhancer.apply("s-other")
+    expect(empty.systemBlocks.some((b) => b.kind === "memory")).toBe(false)
+  })
+
   it("无 skills 目录和 AGENTS.md 时不崩溃", () => {
     const emptyDir = `/tmp/tau-enhancer-empty-${Date.now()}`
     mkdirSync(emptyDir, { recursive: true })
@@ -335,5 +409,88 @@ describe("enhancer: createEnhancer 聚合", () => {
     expect(applied.skillNames).toEqual([])
     expect(applied.systemBlocks).toEqual([])
     rmSync(emptyDir, { recursive: true, force: true })
+  })
+})
+
+describe("loader: mtime/hash 增量装载 + 缓存", () => {
+  const tmpDir = `/tmp/tau-loader-test-${Date.now()}`
+  const skillPath = () => join(tmpDir, ".tau", "skills", "greet.md")
+  const agentsPath = () => join(tmpDir, "AGENTS.md")
+
+  beforeEach(() => {
+    mkdirSync(join(tmpDir, ".tau", "skills"), { recursive: true })
+    writeFileSync(skillPath(), `---\nname: greet\ndescription: 问候技能\n---\nSay hello.`)
+    writeFileSync(agentsPath(), `# Project Rules\n使用 TypeScript。`)
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it("首次装载全 miss,重复装载全 hit(未变文件不重读)", () => {
+    const store = createMemoryStore()
+    const enhancer = createEnhancer({ cwd: tmpDir, store })
+    expect(enhancer.loaderStats()).toMatchObject({ paths: 2, loads: 2, hits: 0 })
+
+    const applied = enhancer.apply()
+    expect(applied.skillNames).toEqual(["greet"])
+
+    enhancer.load()
+    const stats = enhancer.loaderStats()
+    expect(stats.loads).toBe(4)
+    expect(stats.hits).toBe(2)
+  })
+
+  it("文件内容变化后 reload 反映新内容(该文件 miss,其余 hit)", () => {
+    const store = createMemoryStore()
+    const enhancer = createEnhancer({ cwd: tmpDir, store })
+    enhancer.load()
+
+    writeFileSync(skillPath(), `---\nname: greet\ndescription: 升级版问候\n---\nSay hello loudly.`)
+    enhancer.load()
+
+    const applied = enhancer.apply()
+    const contextBlock = applied.systemBlocks.find((b) => b.kind === "context")
+    expect(contextBlock?.content).toContain("升级版问候")
+    const stats = enhancer.loaderStats()
+    expect(stats.hits).toBe(3)
+    expect(stats.loads).toBe(6)
+  })
+
+  it("文件删除后 reload 从目录消失(缓存不残留幽灵条目)", () => {
+    const store = createMemoryStore()
+    const enhancer = createEnhancer({ cwd: tmpDir, store })
+    enhancer.load()
+
+    rmSync(skillPath())
+    enhancer.load()
+
+    expect(enhancer.apply().skillNames).toEqual([])
+  })
+
+  it("LoaderCache 独立使用:mtime 变但内容同 → 重读但结果不变;内容变 → 新值新 hash", () => {
+    const cache = new LoaderCache()
+    const file = join(tmpDir, "note.md")
+    writeFileSync(file, "hello")
+
+    const first = cache.load(file, (raw, hash) => ({ raw, hash }))
+    expect(first?.fromCache).toBe(false)
+    const second = cache.load(file, (raw, hash) => ({ raw, hash }))
+    expect(second?.fromCache).toBe(true)
+    expect(second?.value).toEqual(first?.value)
+    expect(cache.stats()).toMatchObject({ loads: 2, hits: 1 })
+    expect(second?.hash).toBe(sha256("hello"))
+
+    writeFileSync(file, "hello")
+    const third = cache.load(file, (raw, hash) => ({ raw, hash }))
+    expect(third?.fromCache).toBe(false)
+    expect(third?.value).toEqual({ raw: "hello", hash: sha256("hello") })
+
+    writeFileSync(file, "hello world")
+    const fourth = cache.load(file, (raw, hash) => ({ raw, hash }))
+    expect(fourth?.fromCache).toBe(false)
+    expect(fourth?.value).toEqual({ raw: "hello world", hash: sha256("hello world") })
+
+    expect(cache.load("/nonexistent/file.md", (r) => r)).toBeNull()
   })
 })

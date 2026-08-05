@@ -29,6 +29,10 @@ export type FixtureOptions = {
   sessionId?: string
   /** 复用已有 store(恢复测试用:新 session 从旧 store 重放)。 */
   store?: Store
+  /** Config tier 规则:注入裁剪(经 createSession 消费;缺省 undefined = 兼容全量注入)。 */
+  toolTierRules?: import("@tau/contract").ToolTierRules
+  /** 上下文预算(tokens)。 */
+  maxContextTokens?: number
 }
 
 export type Fixture = {
@@ -71,6 +75,8 @@ export function createFixture(opts: FixtureOptions): Fixture {
     workspaceRoots,
     tools: action.registry.all(),
     model: FAUX_MODEL,
+    ...(opts.toolTierRules !== undefined ? { toolTierRules: opts.toolTierRules } : {}),
+    ...(opts.maxContextTokens !== undefined ? { maxContextTokens: opts.maxContextTokens } : {}),
     onEvent: collectEvent,
   })
 
