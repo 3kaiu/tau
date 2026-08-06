@@ -634,6 +634,26 @@ describe("集成:底部状态栏(footer)", () => {
     expect(done).toContain("探索完成")
   })
 
+    it("getLastAssistantText:取最后一条助手回复(/copy 用)", () => {
+    const tc = new TranscriptView()
+    expect(tc.getLastAssistantText()).toBeNull()
+    tc.consume(transcript(userMsg("问题")))
+    expect(tc.getLastAssistantText()).toBeNull()
+    tc.consume(transcript(assistantMsg("回复一")))
+    expect(tc.getLastAssistantText()).toBe("回复一")
+    tc.consume(transcript(assistantMsg("回复二")))
+    expect(tc.getLastAssistantText()).toBe("回复二")
+  })
+
+  it("appendNote:附注行追加不触发 turn 裁剪", () => {
+    const tc = new TranscriptView({ maxTurns: 3 })
+    tc.consume(transcript(userMsg("轮一")))
+    tc.appendNote("⏳ 已排队:补充指令")
+    const out = stripAnsi(tc.render(80).join("\n"))
+    expect(out).toContain("⏳ 已排队")
+    expect(out).toContain("轮一")
+  })
+
   it("信息弹窗:show/dismiss,任意键关闭,宽度一致", () => {    const d = new InfoDialog()
     expect(d.isActive()).toBe(false)
     d.show("斜杠命令", ["  /help 帮助", "  /abort 打断"], () => {})

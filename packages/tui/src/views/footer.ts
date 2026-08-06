@@ -159,27 +159,30 @@ export class FooterComponent implements Component {
     return this.cachedLines
   }
 
-  /** 各 slot 的可见片段;空内容返回空数组(跳过)。 */
+  /** 各 slot 的可见片段(样式对齐 kimi FooterComponent)。 */
   private buildSlots(): Record<string, string[]> {
     const s = this.state
     const slots: Record<string, string[]> = {}
 
-    if (s.busy) slots.busy = [uiColor.primary("●")]
+    if (s.busy) slots.busy = [uiColor.text("●")]
 
+    // mode 徽标:warn 加粗(对齐 kimi [auto] 样式)
     if (s.mode !== null) slots.mode = [statusColor.warn(s.mode)]
 
+    // goal 徽标:primary 点 + muted 括号(对齐 kimi [goal ● active])
     if (s.activeGoals > 0) {
-      slots.goal = [statusColor.accent(`[goal ${s.activeGoals}]`)]
+      slots.goal = [`${statusColor.dim("[goal ")}${uiColor.primary("●")}${statusColor.dim(` ${s.activeGoals}]`)}`]
     }
 
+    // model 标签:text 白(对齐 kimi,非强调色)
     if (s.model !== null) {
       const suffix = s.thinkingEffort !== null && s.thinkingEffort !== "off" ? ` thinking: ${s.thinkingEffort}` : ""
-      slots.model = [uiColor.primary(`${s.model}${suffix}`)]
+      slots.model = [uiColor.text(`${s.model}${suffix}`)]
     }
 
     if (s.pendingCount > 0) slots.pending = [statusColor.warn(`[pending ${s.pendingCount}]`)]
 
-    if (s.cwd !== null) slots.cwd = [uiColor.muted(shortenCwd(s.cwd))]
+    if (s.cwd !== null) slots.cwd = [statusColor.dim(shortenCwd(s.cwd))]
 
     if (s.git !== null) slots.git = [formatGitBadge(s.git)]
 

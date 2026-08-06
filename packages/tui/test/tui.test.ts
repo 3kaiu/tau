@@ -104,6 +104,18 @@ describe("prompt:parseInput", () => {
     expect(parseInput("/usage", sender).kind).toBe("usage")
   })
 
+  it("/sessions /new /status /copy /title 解析", () => {
+    expect(parseInput("/sessions", sender).kind).toBe("sessions")
+    expect(parseInput("/resume", sender).kind).toBe("sessions")
+    expect(parseInput("/new", sender).kind).toBe("new_session")
+    expect(parseInput("/clear", sender).kind).toBe("new_session")
+    expect(parseInput("/status", sender).kind).toBe("status")
+    expect(parseInput("/copy", sender).kind).toBe("copy")
+    const title = parseInput("/title 我的会话", sender)
+    expect(title.kind).toBe("title")
+    if (title.kind === "title") expect(title.text).toBe("我的会话")
+  })
+
   it("formatHelp 包含所有命令", () => {
     const help = formatHelp()
     for (const cmd of SLASH_COMMANDS) {

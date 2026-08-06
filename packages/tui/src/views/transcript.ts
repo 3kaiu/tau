@@ -313,6 +313,11 @@ export class TranscriptView implements Component {
     this.streamDirty = true
   }
 
+  /** 追加一条附注行(排队提示等;不触发 turn 裁剪)。 */
+  appendNote(text: string): void {
+    this.appendEntries([{ kind: "text", text }])
+  }
+
   private appendEntries(newEntries: Entry[]): void {
     this.entries.push(...newEntries)
     if (this.entries.length > this.maxLines) {
@@ -356,6 +361,15 @@ export class TranscriptView implements Component {
 
   getLineCount(): number {
     return this.entries.length
+  }
+
+  /** 取最后一条 assistant 文本(复制 /copy 用);无则返回 null。 */
+  getLastAssistantText(): string | null {
+    for (let i = this.entries.length - 1; i >= 0; i--) {
+      const e = this.entries[i]
+      if (e?.kind === "md") return e.text
+    }
+    return null
   }
 
   invalidate(): void {

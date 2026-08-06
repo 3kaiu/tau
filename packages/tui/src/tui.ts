@@ -10,13 +10,14 @@ import {
   CombinedAutocompleteProvider,
 } from "@earendil-works/pi-tui"
 import type { CommandFace } from "@tau/surface"
-import type { Event, GitStatus, Model, Sender } from "@tau/contract"
+import type { Event, GitStatus, Model, Sender, SessionSnapshot } from "@tau/contract"
 import { editorTheme, statusColor } from "./theme.ts"
 import { TranscriptView } from "./views/transcript.ts"
 import { FooterComponent } from "./views/footer.ts"
 import { PermissionPopup, type PermissionDecision } from "./views/permission.ts"
 import { InfoDialog } from "./views/info-dialog.ts"
 import { parseInput, formatHelp, SLASH_COMMANDS } from "./prompt.ts"
+import { version } from "./index.ts"
 
 export type TuiDeps = {
   face: CommandFace
@@ -33,6 +34,10 @@ export type TuiDeps = {
   git?: GitStatus | null
   /** 模型目录(可选,/model 无参时列出)。 */
   models?: readonly Model[]
+  /** 会话注册表(可选,/sessions 列出)。 */
+  sessions?: readonly SessionSnapshot[]
+  /** 当前会话 id。 */
+  sessionId?: string
 }
 
 export interface Tui {
@@ -48,6 +53,15 @@ function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
   return String(n)
+}
+
+function copyToClipboard(text: string): void {
+  try {
+    const escaped = text.replaceAll("'", "'\\''")
+    Bun.spawnSync(["sh", "-c", `printf '%s' '${escaped}' | pbcopy`])
+  } catch {
+    // 剪贴板不可用静默降级
+  }
 }
 
 export function createTui(deps: TuiDeps): Tui {
@@ -104,6 +118,8 @@ export function createTui(deps: TuiDeps): Tui {
   const stopPromise = new Promise<void>((r) => {
     resolveStop = r
   })
+  /** 流式期间排队待发消息(kimi queue-pane;空闲后逐条消费)。 */
+  const queuedMessages: string[] = []
 
   let spinnerTimer: ReturnType<typeof setInterval> | null = null
   function ensureSpinner(): void {
@@ -153,7 +169,14 @@ export function createTui(deps: TuiDeps): Tui {
 
     footer.setBusy(transcript.isStreaming())
     ensureSpinner()
-    if (!transcript.isStreaming()) stopSpinner()
+    if (!transcript.isStreaming()) {
+      stopSpinner()
+      // 流式结束:排队消息已作为 steer 消费,清空队列
+      if (queuedMessages.length > 0) {
+        queuedMessages.length = 0
+        footer.setTransient("队列已消费")
+      }
+    }
     adjustLayout()
     ui.requestRender()
   }
@@ -221,6 +244,54 @@ export function createTui(deps: TuiDeps): Tui {
         focusEditor()
         return
       }
+      case "sessions": {
+        const sessions = deps.sessions ?? []
+        const cur = deps.sessionId ?? ""
+        const rows = sessions.length === 0
+          ? [statusColor.dim("(无持久会话记录)")]
+          : sessions.map((s) => `  ${s.sessionId === cur ? statusColor.ok("●") : statusColor.dim(" ")} ${s.sessionId}  [${s.status}]  ${s.transcriptCount}消息 ${s.updatedAt.slice(0, 19)}`)
+        rows.push("", statusColor.dim(`用 CLI 切会话:tau sessions resume <id>`))
+        infoDialog.show("会话", rows, () => { ui.hideOverlay(); focusEditor() })
+        ui.showOverlay(infoDialog, { anchor: "center", width: "80%", maxHeight: 25 })
+        return
+      }
+      case "new_session":
+        footer.setTransient("新会话需重启:退出后运行 tau 或 tau --session <id>")
+        focusEditor()
+        return
+      case "status": {
+        const s = footer.getState()
+        const rows = [
+          `  会话:   ${deps.sessionId ?? "-"}`,
+          `  cwd:    ${s.cwd ?? "-"}`,
+          `  model:  ${s.model ?? "-"}`,
+          `  权限:   ${s.mode ?? "ask"}`,
+          `  git:    ${s.git?.branch ?? "-"}${s.git?.dirty ? " (dirty)" : ""}`,
+          `  turn:   ${s.turn}`,
+          `  context:${s.cumulativeTokens} tok${s.maxContextTokens ? ` / ${s.maxContextTokens}` : ""}`,
+          "",
+          statusColor.dim(`tau ${version}`),
+        ]
+        infoDialog.show("状态", rows, () => { ui.hideOverlay(); focusEditor() })
+        ui.showOverlay(infoDialog, { anchor: "center", width: "70%", maxHeight: 20 })
+        return
+      }
+      case "copy": {
+        // 复制最后一条 assistant 回复:从 transcript 取,写剪贴板
+        const last = transcript.getLastAssistantText()
+        if (last === null) {
+          footer.setTransient("无助手回复可复制")
+        } else {
+          copyToClipboard(last)
+          footer.setTransient(`已复制最后一条回复(${last.length} 字符)`)
+        }
+        focusEditor()
+        return
+      }
+      case "title":
+        footer.setTransient("会话标题在创建时设定(重启生效)")
+        focusEditor()
+        return
       case "usage": {
         const s = footer.getState()
         const pct = s.maxContextTokens !== null && s.maxContextTokens > 0 ? `${Math.round((s.cumulativeTokens / s.maxContextTokens) * 100)}%` : "-"
@@ -259,6 +330,18 @@ export function createTui(deps: TuiDeps): Tui {
       case "compact": {
         const cmdKind = parsed.command.kind
         editor.disableSubmit = true
+        // 流式期间提交普通 prompt → 排队(kimi queue-pane):显示"已排队",经 steer 注入
+        if (cmdKind === "prompt" && transcript.isStreaming()) {
+          editor.disableSubmit = false
+          queuedMessages.push(parsed.command.text.slice(0, 200))
+          editor.addToHistory?.(text)
+          transcript.appendNote(statusColor.dim(`⏳ 已排队:${parsed.command.text.slice(0, 60)}${parsed.command.text.length > 60 ? "…" : ""}`))
+          void face.publish({ kind: "steer", sender, text: parsed.command.text, ref: "queued" })
+          footer.setTransient(`已排队(${queuedMessages.length} 条待发)`)
+          ui.requestRender()
+          focusEditor()
+          return
+        }
         const result = await face.publish(parsed.command)
         editor.disableSubmit = false
         // 提交成功 → 入历史(↑/↓ 回顾);失败也入历史(便于重试修正)

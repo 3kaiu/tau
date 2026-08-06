@@ -15,6 +15,11 @@ export type ParsedInput =
   | { kind: "compact"; command: Command }
   | { kind: "set_permission"; command: Command; enabled: boolean }
   | { kind: "usage" }
+  | { kind: "sessions" }
+  | { kind: "new_session" }
+  | { kind: "title"; text: string }
+  | { kind: "status" }
+  | { kind: "copy" }
   | { kind: "help" }
   | { kind: "unknown"; name: string; detail: string }
   | { kind: "empty" }
@@ -36,6 +41,10 @@ export const SLASH_COMMANDS: readonly SlashCommandDef[] = [
   { name: "compact", description: "手动压缩上下文", usage: "/compact" },
   { name: "permission", description: "切换权限模式(auto/ask)", usage: "/permission <auto|ask>" },
   { name: "usage", description: "查看用量与上下文占用", usage: "/usage" },
+  { name: "sessions", aliases: ["resume"], description: "列出会话", usage: "/sessions" },
+  { name: "new", aliases: ["clear"], description: "新会话(提示用 CLI 开启)", usage: "/new" },
+  { name: "status", description: "显示会话与运行时状态", usage: "/status" },
+  { name: "copy", description: "复制最后一条助手回复", usage: "/copy" },
   { name: "help", description: "显示斜杠命令列表", usage: "/help" },
 ] as const
 
@@ -82,6 +91,21 @@ export function parseInput(raw: string, sender: Sender): ParsedInput {
     }
     case "usage":
       return { kind: "usage" }
+    case "sessions":
+    case "resume":
+      return { kind: "sessions" }
+    case "new":
+    case "clear":
+      return { kind: "new_session" }
+    case "status":
+      return { kind: "status" }
+    case "copy":
+      return { kind: "copy" }
+    case "title":
+    case "rename": {
+      if (rest === "") return { kind: "unknown", name, detail: "缺标题(/title <名称>)" }
+      return { kind: "title", text: rest }
+    }
     case "help":
       return { kind: "help" }
     default:

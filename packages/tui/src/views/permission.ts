@@ -3,7 +3,6 @@
 // 批准是显式 Command(approve),不是渲染层技巧;deny 也是 Command(经 answer 传 false 或 approve 传拒绝)。
 // 安全链最后一环:tui 渲染 summary 字段,面层原样透传不裁剪。
 
-import chalk from "chalk"
 import type { Component, Focusable } from "@earendil-works/pi-tui"
 import { matchesKey } from "@earendil-works/pi-tui"
 import type { PermissionEvent } from "@tau/contract"
@@ -85,13 +84,13 @@ export class PermissionPopup implements Component, Focusable {
     const boxW = innerW + 4
     const lines: string[] = []
 
-    const topBorder = statusColor.warn("┌" + "─".repeat(boxW - 2) + "┐")
-    const botBorder = statusColor.warn("└" + "─".repeat(boxW - 2) + "┘")
-    const sideBar = statusColor.warn("│")
+    const topBorder = statusColor.accent("┌" + "─".repeat(boxW - 2) + "┐")
+    const botBorder = statusColor.accent("└" + "─".repeat(boxW - 2) + "┘")
+    const sideBar = statusColor.accent("│")
 
     lines.push(topBorder)
     const titleText = "⚠ 权限请求"
-    lines.push(`${sideBar} ${chalk.yellow.bold(titleText)}${" ".repeat(Math.max(0, innerW - visibleWidth(titleText)))} ${sideBar}`)
+    lines.push(`${sideBar} ${statusColor.accent(titleText)}${" ".repeat(Math.max(0, innerW - visibleWidth(titleText)))} ${sideBar}`)
 
     const toolLine = `工具: ${req.toolName}`
     lines.push(`${sideBar} ${truncateToWidth(toolLine, innerW)}${padTo(toolLine, innerW)} ${sideBar}`)
@@ -104,8 +103,8 @@ export class PermissionPopup implements Component, Focusable {
 
     lines.push(`${sideBar}${" ".repeat(boxW - 2)}${sideBar}`)
 
-    const yesLabel = this.selected === 0 ? chalk.yellow.bold("[ Y 批准 ]") : statusColor.dim("[ Y 批准 ]")
-    const noLabel = this.selected === 1 ? chalk.red.bold("[ N 拒绝 ]") : statusColor.dim("[ N 拒绝 ]")
+    const yesLabel = this.selected === 0 ? statusColor.ok("[ Y 批准 ]") : statusColor.dim("[ Y 批准 ]")
+    const noLabel = this.selected === 1 ? statusColor.error("[ N 拒绝 ]") : statusColor.dim("[ N 拒绝 ]")
     const choiceLine = `  ${yesLabel}    ${noLabel}`
     const choicePad = Math.max(0, innerW - visibleWidth(choiceLine))
     lines.push(`${sideBar} ${choiceLine}${" ".repeat(choicePad)} ${sideBar}`)
