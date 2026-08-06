@@ -27,6 +27,8 @@ export type TranscriptOptions = {
   maxLines?: number
   /** 保留的最近轮数(user 消息计为轮边界;0 = 禁用轮裁剪,仅按 maxLines)。 */
   maxTurns?: number
+  /** 左侧 gutter(对齐输入框内区,参考 kimi CHROME_GUTTER)。 */
+  leftPad?: number
 }
 
 /** 已提交行:普通文本行 / markdown 块(assistant 正文,md 渲染) / thinking 块(可折叠) / 工具行(进行中/完成)。 */
@@ -159,6 +161,7 @@ export class TranscriptView implements Component {
   constructor(opts: TranscriptOptions = {}) {
     this.maxLines = opts.maxLines ?? 500
     this.maxTurns = opts.maxTurns ?? 0
+    this.leftPad = opts.leftPad ?? 0
   }
 
   /** 设置渲染时最多返回的行数(从底部截取),由 TUI 按终端高度调控。 */
@@ -241,8 +244,10 @@ export class TranscriptView implements Component {
       case "transcript": {
         this.resetStreaming()
         // user 消息 = 轮边界:超过 maxTurns 时裁剪最老轮(参考 kimi 滑动窗口,保留最近 N 轮完整)
-        if (this.maxTurns > 0 && event.message.role === "user") {
-          this.trimToMaxTurns()
+        if (event.message.role === "user") {
+          // 轮间空行分隔(对齐 kimi assistant-message 前导空行)
+          if (this.entries.length > 0) this.appendEntries([{ kind: "text", text: "" }])
+          if (this.maxTurns > 0) this.trimToMaxTurns()
         }
         this.appendEntries(formatMessage(event.message))
         break
@@ -452,6 +457,7 @@ export class TranscriptView implements Component {
   private mdComponent: Markdown | null = null
   private mdText = ""
   private mdWidth = -1
+  private readonly leftPad: number
 
   render(width: number): string[] {
     const streamLines = this.streamLines()
@@ -469,7 +475,12 @@ export class TranscriptView implements Component {
       this.cachedHasStream = false
     }
     this.streamDirty = false
-    if (streamLines.length === 0) return this.cachedLines as string[]
+    const applyPad = (rows: string[]): string[] => {
+      if (this.leftPad === 0) return rows
+      const pad = " ".repeat(this.leftPad)
+      return rows.map((l) => (l === "" ? l : pad + l))
+    }
+    if (streamLines.length === 0) return applyPad(this.cachedLines as string[])
     // 有进行中流:不可直接复用缓存(会污染),每次重建并追加流式行
     const base = this.cachedLines as string[]
     const out = base.slice()
@@ -478,7 +489,7 @@ export class TranscriptView implements Component {
       out.push(wrapLine(sl, width))
     }
     this.cachedHasStream = true
-    return out
+    return applyPad(out)
   }
 
   private cachedHasStream = false

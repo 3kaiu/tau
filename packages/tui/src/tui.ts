@@ -71,7 +71,7 @@ export function createTui(deps: TuiDeps): Tui {
   const terminal = new ProcessTerminal()
   const ui = new PiTui(terminal)
 
-  const transcript = new TranscriptView({ maxLines: 1000, maxTurns: 15 })
+  const transcript = new TranscriptView({ maxLines: 1000, maxTurns: 15, leftPad: 1 })
   const permissionPopup = new PermissionPopup()
   const infoDialog = new InfoDialog()
 
@@ -104,7 +104,7 @@ export function createTui(deps: TuiDeps): Tui {
     "",
   ])
   // kimi-code 风格底部状态栏(双行:mode/goal/model/pending/cwd/git + context 用量),贴编辑器下方
-  const footer = new FooterComponent()
+  const footer = new FooterComponent({ leftPad: 1 })
   footer.update({
     model: deps.model ?? null,
     thinkingEffort: deps.thinkingEffort ?? null,

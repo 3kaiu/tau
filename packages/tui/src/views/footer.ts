@@ -62,6 +62,11 @@ export class FooterComponent implements Component {
   private transientHint: string | null = null
   private cachedLines: string[] | null = null
   private cachedWidth = -1
+  private readonly leftPad: number
+
+  constructor(opts: { leftPad?: number } = {}) {
+    this.leftPad = opts.leftPad ?? 0
+  }
 
   update(state: Partial<FooterState>): void {
     this.state = { ...this.state, ...state }
@@ -156,6 +161,10 @@ export class FooterComponent implements Component {
     }
 
     this.cachedLines = [truncateToWidth(line1, width), truncateToWidth(line2, width)]
+    if (this.leftPad > 0) {
+      const pad = " ".repeat(this.leftPad)
+      this.cachedLines = this.cachedLines.map((l) => (l === "" ? l : pad + l))
+    }
     return this.cachedLines
   }
 

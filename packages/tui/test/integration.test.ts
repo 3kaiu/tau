@@ -387,12 +387,12 @@ describe("集成:Event 流驱动 transcript + tool-panel", () => {
     // 旧的丢弃
     expect(text).not.toContain("msg-0")
     expect(text).not.toContain("msg-14")
-    // 最近 5 条保留
-    expect(text).toContain("msg-15")
+    // 最近保留(空行分隔占位,msg-15 可能被挤掉)
     expect(text).toContain("msg-19")
+    expect(text).not.toContain("msg-5")
 
-    // 内部存储仍保留全部(getLineCount 不受 maxRenderLines 影响)
-    expect(tc.getLineCount()).toBe(20)
+    // 内部存储仍保留全部(getLineCount 不受 maxRenderLines 影响;含轮间空行)
+    expect(tc.getLineCount()).toBe(39)
   })
 
   it("invalidate 手动失效缓存,下次 render 重建", () => {
